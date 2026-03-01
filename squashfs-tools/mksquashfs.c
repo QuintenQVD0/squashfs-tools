@@ -3,7 +3,7 @@
  * filesystem.
  *
  * Copyright (c) 2002, 2003, 2004, 2005, 2006, 2007, 2008, 2009, 2010, 2011,
- * 2012, 2013, 2014, 2017, 2019, 2020, 2021, 2022, 2023, 2024, 2025
+ * 2012, 2013, 2014, 2017, 2019, 2020, 2021, 2022, 2023, 2024, 2025, 2026
  * Phillip Lougher <phillip@squashfs.org.uk>
  *
  * This program is free software; you can redistribute it and/or
@@ -422,7 +422,7 @@ struct dir_info *scan1_opendir(char *pathname, char *subpath,
 							unsigned int depth);
 static void write_filesystem_tables(struct squashfs_super_block *sBlk);
 unsigned short get_checksum_mem(char *buff, int bytes);
-static void print_summary(struct squashfs_super_block *sBlk);
+static void print_summary();
 void write_destination(int fd, long long byte, long long bytes, void *buff);
 static int old_excluded(char *filename, struct stat *buf);
 static void write_superblock(struct squashfs_super_block *sBlk);
@@ -610,7 +610,7 @@ void restorefs()
 		unlink(recovery_file);
 
 	if(!quiet)
-		print_summary(&sBlk);
+		print_summary();
 
 	exit(1);
 }
@@ -897,6 +897,9 @@ static long long write_directories()
 static int check_id_table_offset()
 {
 	int i;
+
+	if(uid_gid_offset == 0)
+		return TRUE;
 
 	INFO("Updating id table with -uid-gid-offset value %u", uid_gid_offset);
 
@@ -3355,6 +3358,26 @@ static struct inode_info *lookup_inode4(struct stat *buf, struct pseudo_dev *pse
 	 * allow hard-links to directories.
 	 */
 	if ((buf->st_mode & S_IFMT) != S_IFDIR && !no_hardlinks) {
+		/*
+		 * When comparing stat information to find hard linked files,
+		 * don't compare the access time, because that will produce a
+		 * false negative if the file is either:
+		 *
+		 * - a symbolic link and the filesystem is mounted strictatime,
+		 *   lazyatime, or relatime and the symbolic link has been
+		 *   created or modified since the last access.
+		 *
+		 * - any other non-directory file and another process accesses
+		 *   the file and the filesystem is mounted strictatime,
+		 *   lazytime or relatime and the file has been created or
+		 *   modified since the last access.
+		 */
+#ifdef st_atime
+		memset(&buf->st_atim, 0, sizeof(buf->st_atim));
+#else
+		memset(&buf->st_atime, 0, sizeof(buf->st_atime));
+#endif
+
 		for(inode = inode_info[ino_hash]; inode; inode = inode->next) {
 			if(memcmp(buf, &inode->buf, sizeof(struct stat)) == 0) {
 				inode->nlink ++;
@@ -3909,12 +3932,6 @@ static struct dir_info *dir_scan1(char *filename, char *subpath,
 		return NULL;
 	}
 
-	if(max_depth_opt && depth > max_depth) {
-		add_excluded(dir);
-		scan1_freedir(dir);
-		return dir;
-	}
-
 	while((dir_ent = _readdir(dir))) {
 		struct dir_info *sub_dir;
 		struct stat buf;
@@ -3927,6 +3944,13 @@ static struct dir_info *dir_scan1(char *filename, char *subpath,
 		if(strcmp(dir_name, ".") == 0 || strcmp(dir_name, "..") == 0) {
 			free_dir_entry(dir_ent);
 			continue;
+		}
+
+		if(max_depth_opt && depth > max_depth) {
+			free_dir_entry(dir_ent);
+			add_excluded(dir);
+			scan1_freedir(dir);
+			return dir;
 		}
 
 		if(lstat(filename, &buf) == -1) {
@@ -4127,12 +4151,13 @@ static void dir_scan2(struct dir_info *dir, struct pseudo *pseudo)
 			} else if(dir_ent == NULL && pseudo_ent->pseudo)
 				BAD_ERROR("Pathname \"%s\" does not exist in "
 					"filesystem.  Some pseudo definitions "
-					"will not be created.\n",
-					pseudo_ent->pathname);
+					"will not be created (or evaluated if "
+					"m or M).\n", pseudo_ent->pathname);
 			else if(dir_ent && !S_ISDIR(dir_ent->inode->buf.st_mode) &&
 								pseudo_ent->pseudo)
-				BAD_ERROR("Pathname \"%s\" is not a directory.  Some "
-					"pseudo definitions will not be created.\n",
+				BAD_ERROR("Pathname \"%s\" is not a directory. "
+					" Some pseudo definitions will not be "
+					"created (or evaluated if m or M).\n",
 					pseudo_ent->pathname);
 			else
 				continue;
@@ -4140,13 +4165,24 @@ static void dir_scan2(struct dir_info *dir, struct pseudo *pseudo)
 
 		if(pseudo_ent->dev->type == 'm' || pseudo_ent->dev->type == 'M') {
 			struct stat *buf;
-			if(dir_ent == NULL) {
+			if(dir_ent == NULL && pseudo_ent->pseudo == NULL) {
 				ERROR_START("Pseudo modify file \"%s\" does "
 					"not exist in source filesystem.",
 					pseudo_ent->pathname);
 				ERROR_EXIT("  Ignoring.\n");
 				continue;
-			}
+			} else if(dir_ent == NULL)
+				BAD_ERROR("Pseudo modify pathname \"%s\" does "
+					"not exist in filesystem.  Some pseudo "
+					"definitions will not be created (or "
+					"evaluated if m or M).\n",
+					pseudo_ent->pathname);
+			else if(dir_ent && !S_ISDIR(dir_ent->inode->buf.st_mode) &&
+								pseudo_ent->pseudo)
+				BAD_ERROR("Pathname \"%s\" is not a directory. "
+					" Some pseudo definitions will not be "
+					"created (or evaluated if m or M).\n",
+					pseudo_ent->pathname);
 			buf = &dir_ent->inode->buf;
 			buf->st_mode = (buf->st_mode & S_IFMT) |
 				pseudo_ent->dev->buf->mode;
@@ -5181,12 +5217,19 @@ static squashfs_inode no_sources(int progress)
 	struct pseudo_dev *pseudo_dev;
 	struct pseudo *pseudo = get_pseudo();
 
-	if(pseudo == NULL || pseudo->names != 1 || strcmp(pseudo->head->name, "/") != 0) {
-		if(!pseudo_dir) {
-			ERROR_START("Source is \"-\", but no pseudo definition for \"/\"\n");
-			ERROR_EXIT("Did you forget to specify -cpiostyle or -tar?\n");
-			EXIT_MKSQUASHFS();
-		} else
+	if(!pseudo || pseudo->names != 1 || strcmp(pseudo->head->name, "/") != 0) {
+		if(!pseudo_dir)
+			BAD_ERROR("Source is \"-\", but no pseudo definition "
+				"for \"/\"\nDid you forget to specify "
+				"-cpiostyle or -tar?\n");
+		else
+			pseudo_dev = pseudo_dir;
+	} else if(!pseudo->head->dev) {
+		if(!pseudo_dir)
+			BAD_ERROR("Source is \"-\", but only XATTR pseudo "
+				"definition for \"/\"\nDid you forget to "
+				"specify -cpiostyle or -tar?\n");
+		else
 			pseudo_dev = pseudo_dir;
 	} else
 		pseudo_dev = pseudo->head->dev;
@@ -5915,7 +5958,12 @@ static void write_filesystem_tables(struct squashfs_super_block *sBlk)
 
 static void write_superblock(struct squashfs_super_block *sBlk)
 {
-	long long block = streaming ? get_dpos() : SQUASHFS_START;
+	long long block;
+
+	if(streaming)
+		block = nopad ? get_dpos() : (get_dpos() + 4095) & ~4095;
+	else
+		block = SQUASHFS_START;
 
 	SQUASHFS_INSWAP_SUPER_BLOCK(sBlk);
 
@@ -6257,7 +6305,7 @@ static void print_version(char *string)
 }
 
 
-static void print_summary(struct squashfs_super_block *sBlk)
+static void print_summary()
 {
 	int i;
 
@@ -6271,10 +6319,10 @@ static void print_summary(struct squashfs_super_block *sBlk)
 		"compressed", noI || noId ? "uncompressed" : "compressed");
 	printf("\tduplicates are %sremoved\n", duplicate_checking ? "" :
 		"not ");
-	printf("Filesystem size %.2f Kbytes (%.2f Mbytes)\n", sBlk->bytes_used / 1024.0,
-		sBlk->bytes_used / (1024.0 * 1024.0));
+	printf("Filesystem size %.2f Kbytes (%.2f Mbytes)\n", get_dpos() / 1024.0,
+		get_dpos() / (1024.0 * 1024.0));
 	printf("\t%.2f%% of uncompressed filesystem size (%.2f Kbytes)\n",
-		((float) sBlk->bytes_used / total_bytes) * 100.0, total_bytes / 1024.0);
+		((float) get_dpos() / total_bytes) * 100.0, total_bytes / 1024.0);
 	printf("Inode table size %lld bytes (%.2f Kbytes)\n",
 		inode_bytes, inode_bytes / 1024.0);
 	printf("\t%.2f%% of uncompressed inode table size (%lld bytes)\n",
@@ -6464,12 +6512,17 @@ static void fix_file(char *filename)
 	if(res < sizeof(struct squashfs_super_block))
 		BAD_ERROR("Failed to read file \"%s\"\n", filename);
 
-	SQUASHFS_INSWAP_SUPER_BLOCK(&sblk);
-
-	if(sblk.s_magic != SQUASHFS_MAGIC_STREAMED)
+	if(sblk.s_magic != SQUASHFS_MAGIC_STREAMED && sblk.s_magic != SQUASHFS_MAGIC_STREAMED_SWAPPED)
 		BAD_ERROR("File \"%s\" is not a streamed Squashfs file, incorrect magic found!\n", filename);
 
-	offset = lseek(fd, -sizeof(struct squashfs_super_block), SEEK_END);
+	offset = lseek(fd, 0, SEEK_END);
+	if(offset == -1)
+		BAD_ERROR("Failed to lseek to end of file \"%s\"\n", filename);
+
+	if(offset < sizeof(struct squashfs_super_block))
+		BAD_ERROR("Filesystem too small, less than super block in size!\n");
+
+	offset = lseek(fd, offset - sizeof(struct squashfs_super_block), SEEK_SET);
 	if(offset == -1)
 		BAD_ERROR("Failed to lseek to end of file \"%s\"\n", filename);
 
@@ -6477,9 +6530,7 @@ static void fix_file(char *filename)
 	if(res < sizeof(struct squashfs_super_block))
 		BAD_ERROR("Failed to read file \"%s\"\n", filename);
 
-	SQUASHFS_INSWAP_SUPER_BLOCK(&sblk);
-
-	if(sblk.s_magic != SQUASHFS_MAGIC)
+	if(sblk.s_magic != SQUASHFS_MAGIC && sblk.s_magic != SQUASHFS_MAGIC_SWAP)
 		BAD_ERROR("File \"%s\" is not a streamed Squashfs file, incorrect magic found!\n", filename);
 
 	res = lseek(fd, SQUASHFS_START, SEEK_SET);
@@ -7182,8 +7233,8 @@ static int sqfstar(int argc, char *argv[])
 	 * Streaming is incompatible with the progress bar, percentage output,
 	 * info output to stdout, and summary output
 	 *
-	 * Complain if -force-progress or -percentage have been used, as they
-	 * produce a conflict
+	 * Complain if -force-progress, -percentage or -offset have been used,
+	 * as they produce a conflict
 	 */
 	if(streaming) {
 		if(force_progress)
@@ -7196,6 +7247,9 @@ static int sqfstar(int argc, char *argv[])
 		if(display_info && !info_file)
 			BAD_ERROR("-stream cannot be used with -info, use "
 				"-info-file instead\n");
+
+		if(start_offset)
+			BAD_ERROR("-stream cannot be used with -offset\n");
 
 		/*
 		 * When streaming Mksquashfs cannot do duplicate checking as it
@@ -7435,9 +7489,8 @@ static int sqfstar(int argc, char *argv[])
 	}
 
 	if(!nopad && (i = get_dpos() & (4096 - 1))) {
-		long long block = get_and_inc_dpos(4096 - i);
 		char temp[4096] = {0};
-		write_destination(fd, block, 4096 - i, temp);
+		write_destination(fd, get_dpos(), 4096 - i, temp);
 	}
 
 	write_superblock(&sBlk);
@@ -7452,7 +7505,7 @@ static int sqfstar(int argc, char *argv[])
 		unlink(recovery_file);
 
 	if(!quiet)
-		print_summary(&sBlk);
+		print_summary();
 
 	if(logging)
 		fclose(log_fd);
@@ -7693,6 +7746,7 @@ int main(int argc, char *argv[])
 		else if(strcmp(argv[i], "-max-depth") == 0) {
 			if((++i == argc) || !parse_num_unsigned(argv[i], &max_depth))
 				mksquashfs_option_help(argv[i - 1], "mksquashfs: -max-depth missing or invalid value\n");
+			max_depth_opt = TRUE;
 		} else if(strcmp(argv[i], "-throttle") == 0) {
 			if((++i == argc) || !parse_number(argv[i], &res, 2))
 				mksquashfs_option_help(argv[i - 1], "mksquashfs: -throttle missing or invalid value\n");
@@ -8374,6 +8428,10 @@ int main(int argc, char *argv[])
 	if(tarfile && any_actions())
 		BAD_ERROR("Actions are unsupported when reading tar files\n");
 
+	/* If -tar option is set, then the -max-depth option cannot be used */
+	if(tarfile && max_depth_opt)
+		BAD_ERROR("-max-depth is not supported reading tar files\n");
+
 	/* If -tar option is set and there are exclude files (either -ef or -e),
 	 * then -wildcards must be set too.  The older legacy exclude code
 	 * cannot be used with tar files */
@@ -8399,8 +8457,8 @@ int main(int argc, char *argv[])
 	 * Streaming is incompatible with the progress bar, percentage output,
 	 * info output to stdout, and summary output
 	 *
-	 * Complain if -force-progress or -percentage have been used, as they
-	 * produce a conflict
+	 * Complain if -force-progress, -percentage or -offset have been used,
+	 * as they produce a conflict
 	 */
 	if(streaming) {
 		if(force_progress)
@@ -8408,6 +8466,9 @@ int main(int argc, char *argv[])
 
 		if(percentage)
 			BAD_ERROR("-stream cannot be used wih -percentage\n");
+
+		if(start_offset)
+			BAD_ERROR("-stream cannot be used with -offset\n");
 
 		/* -info cannot be used, unless it is to a file */
 		if(display_info && !info_file)
@@ -8883,9 +8944,8 @@ int main(int argc, char *argv[])
 	}
 
 	if(!nopad && (i = get_dpos() & (4096 - 1))) {
-		long long block = get_and_inc_dpos(4096 - i);
 		char temp[4096] = {0};
-		write_destination(fd, block, 4096 - i, temp);
+		write_destination(fd, get_dpos(), 4096 - i, temp);
 	}
 
 	write_superblock(&sBlk);
@@ -8900,7 +8960,7 @@ int main(int argc, char *argv[])
 		unlink(recovery_file);
 
 	if(!quiet)
-		print_summary(&sBlk);
+		print_summary();
 
 	if(logging)
 		fclose(log_fd);
