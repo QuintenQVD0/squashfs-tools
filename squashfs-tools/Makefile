@@ -182,7 +182,7 @@ USE_PREBUILT_MANPAGES = n
 #
 INSTALL_PREFIX = /usr/local
 INSTALL_DIR = $(INSTALL_PREFIX)/bin
-INSTALL_MANPAGES_DIR = $(INSTALL_PREFIX)/man/man1
+INSTALL_MANPAGES_DIR = $(INSTALL_PREFIX)/share/man/man1
 
 ###############################################
 #             __ATOMIC_EXCHANGE_N             #
@@ -258,7 +258,7 @@ MKSQUASHFS_OBJS = mksquashfs.o read_fs.o action.o swap.o pseudo.o compressor.o \
 UNSQUASHFS_OBJS = unsquashfs.o unsquash-1.o unsquash-2.o unsquash-3.o \
 	unsquash-4.o unsquash-123.o unsquash-34.o unsquash-1234.o unsquash-12.o \
 	swap.o compressor.o unsquashfs_info.o date.o memory.o print_pager.o \
-	unsquashfs_help.o nprocessors_compat.o limit.o
+	unsquashfs_help.o nprocessors_compat.o limit.o crc16.o
 
 CFLAGS ?= -O2
 CFLAGS += $(EXTRA_CFLAGS) $(INCLUDEDIR) -D_FILE_OFFSET_BITS=64 \
@@ -559,12 +559,15 @@ unsquashfs_help.o: unsquashfs_help.c unsquashfs_help.h
 
 limit.o: limit.h error.h
 
+crc16.o: crc16.h
+
 unsquashfs: $(UNSQUASHFS_OBJS)
 	$(CC) $(LDFLAGS) $(EXTRA_LDFLAGS) $(UNSQUASHFS_OBJS) $(LIBS) -o $@
 	ln -sf unsquashfs sqfscat
 
 unsquashfs.o: unsquashfs.h unsquashfs.c squashfs_fs.h squashfs_swap.h \
-	squashfs_compat.h xattr.h read_fs.h compressor.h unsquashfs_error.h
+	squashfs_compat.h xattr.h read_fs.h compressor.h unsquashfs_error.h \
+	crc16.h
 
 unsquash-1.o: unsquashfs.h unsquash-1.c squashfs_fs.h squashfs_compat.h unsquashfs_error.h
 
@@ -593,9 +596,9 @@ clean:
 
 .PHONY: install
 install: mksquashfs unsquashfs
-	mkdir -p $(INSTALL_DIR)
-	cp mksquashfs $(INSTALL_DIR)
-	cp unsquashfs $(INSTALL_DIR)
-	ln -fs unsquashfs $(INSTALL_DIR)/sqfscat
-	ln -fs mksquashfs $(INSTALL_DIR)/sqfstar
-	generate-manpages/install-manpages.sh $(shell pwd)/.. "$(INSTALL_MANPAGES_DIR)" "$(USE_PREBUILT_MANPAGES)"
+	mkdir -p $(DESTDIR)$(INSTALL_DIR)
+	cp mksquashfs $(DESTDIR)$(INSTALL_DIR)
+	cp unsquashfs $(DESTDIR)$(INSTALL_DIR)
+	ln -fs unsquashfs $(DESTDIR)$(INSTALL_DIR)/sqfscat
+	ln -fs mksquashfs $(DESTDIR)$(INSTALL_DIR)/sqfstar
+	generate-manpages/install-manpages.sh $(shell pwd)/.. "$(DESTDIR)$(INSTALL_MANPAGES_DIR)" "$(USE_PREBUILT_MANPAGES)"

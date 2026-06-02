@@ -378,7 +378,7 @@ char *option_table[] = { "comp", "b", "mkfs-time", "fstime", "inode-time",
 	"mem-percent", "-pd", "-pseudo-dir", "help-option", "ho", "help-section",
 	"hs", "info-file", "force-file-mode", "force-dir-mode",
 	"small-readers", "block-readers", "uid-gid-offset", "all-time",
-	"overcommit", "repro-time", "cols", NULL
+	"overcommit", "repro-time", "cols", "deref", "deref-path", NULL
 };
 
 char *sqfstar_option_table[] = { "comp", "b", "mkfs-time", "fstime",
@@ -1642,14 +1642,18 @@ again:
 	pthread_mutex_unlock(&dup_mutex);
 
 	compressed_buffer = cache_lookup(fwriter_buffer, index);
-
-	pthread_cleanup_push((void *) pthread_mutex_unlock, &fragment_mutex);
-	pthread_mutex_lock(&fragment_mutex);
-	disk_fragment = &fragment_table[index];
-	size = SQUASHFS_COMPRESSED_SIZE_BLOCK(disk_fragment->size);
-	compressed = SQUASHFS_COMPRESSED_BLOCK(disk_fragment->size);
-	start_block = disk_fragment->start_block;
-	pthread_cleanup_pop(1);
+	if(compressed_buffer) {
+		size = SQUASHFS_COMPRESSED_SIZE_BLOCK(compressed_buffer->c_byte);
+		compressed = SQUASHFS_COMPRESSED_BLOCK(compressed_buffer->c_byte);
+	} else {
+		pthread_cleanup_push((void *) pthread_mutex_unlock, &fragment_mutex);
+		pthread_mutex_lock(&fragment_mutex);
+		disk_fragment = &fragment_table[index];
+		size = SQUASHFS_COMPRESSED_SIZE_BLOCK(disk_fragment->size);
+		compressed = SQUASHFS_COMPRESSED_BLOCK(disk_fragment->size);
+		start_block = disk_fragment->start_block;
+		pthread_cleanup_pop(1);
+	}
 
 	if(compressed) {
 		int error;
@@ -1983,19 +1987,26 @@ static unsigned short get_checksum_buffers(long long start, long long l,
 		if(buffers[i])
 			chksum = get_checksum(buffers[i]->data, bytes, chksum);
 		else {
-			void *data;
+			struct file_buffer *write_buffer = queue_cache_lookup(bwriter_buffer, start);
 
-			if(dpos == -1)
-				dpos = get_virt_disk(start);
+			if(write_buffer) {
+				chksum = get_checksum(write_buffer->data, bytes, chksum);
+				gen_cache_block_put(write_buffer);
+			} else {
+				void *data;
 
-			data = read_from_disk(dpos, bytes, 0);
-			if(data == NULL) {
-				ERROR("Failed to checksum data from output"
-					" filesystem\n");
-				BAD_ERROR("Output filesystem corrupted?\n");
+				if(dpos == -1)
+					dpos = get_virt_disk(start);
+
+				data = read_from_disk(dpos, bytes, 0);
+				if(data == NULL) {
+					ERROR("Failed to checksum data from output"
+						" filesystem\n");
+					BAD_ERROR("Output filesystem corrupted?\n");
+				}
+
+				chksum = get_checksum(data, bytes, chksum);
 			}
-
-			chksum = get_checksum(data, bytes, chksum);
 		}
 
 		l -= bytes;
@@ -2306,7 +2317,7 @@ static struct file_info *duplicate(int *dupf, int *block_dup,
 	unsigned short checksum = 0;
 	char checksum_flag = FALSE;
 	struct fragment *fragment;
-	long long dupl_start, cached_target = -1;
+	long long dupl_start;
 
 	/* Look for a possible duplicate set of blocks */
 	for(dupl_ptr = dupl_block[bl_hash]; dupl_ptr;
@@ -2347,7 +2358,7 @@ static struct file_info *duplicate(int *dupf, int *block_dup,
 			 */
 			for(block = 0; block < blocks; block ++) {
 				int size = SQUASHFS_COMPRESSED_SIZE_BLOCK(block_list[block]);
-				struct file_buffer *dup_buffer = NULL;
+				struct file_buffer *dup_buffer = NULL, *target_buffer = NULL;
 				char *target_data, *dup_data;
 				int res;
 
@@ -2364,17 +2375,19 @@ static struct file_info *duplicate(int *dupf, int *block_dup,
 				if(buffer_list[block])
 					target_data = buffer_list[block]->data;
 				else {
-					if(dtarget_start == -1) {
-						if(cached_target == -1)
-							cached_target = get_virt_disk(target_start);
-						dtarget_start = cached_target;
-					}
-					target_data = read_from_disk(dtarget_start, size, 0);
-					if(target_data == NULL) {
-						ERROR("Failed to read data from"
-							" output filesystem\n");
-						BAD_ERROR("Output filesystem"
-							" corrupted?\n");
+					target_buffer = queue_cache_lookup(bwriter_buffer, target_start);
+					if(target_buffer)
+						target_data = target_buffer->data;
+					else {
+						if(dtarget_start == -1)
+							dtarget_start = get_virt_disk(target_start);
+						target_data = read_from_disk(dtarget_start, size, 0);
+						if(target_data == NULL) {
+							ERROR("Failed to read data from"
+								" output filesystem\n");
+							BAD_ERROR("Output filesystem"
+								" corrupted?\n");
+						}
 					}
 				}
 
@@ -2400,6 +2413,7 @@ static struct file_info *duplicate(int *dupf, int *block_dup,
 				}
 
 				res = memcmp(target_data, dup_data, size);
+				gen_cache_block_put(target_buffer);
 				gen_cache_block_put(dup_buffer);
 				if(res != 0)
 					break;
@@ -2997,7 +3011,7 @@ static struct file_info *write_file_blocks_dup(int *status, struct dir_ent *dir_
 				file_bytes += read_buffer->size;
 				if(block < thresh) {
 					buffer_list[block++] = NULL;
-					put_write_buffer(read_buffer);
+					put_write_buffer_hash(read_buffer);
 				} else
 					buffer_list[block++] = read_buffer;
 				inc_progress_bar();
@@ -3677,6 +3691,7 @@ static squashfs_inode scan_single(char *pathname, int progress, int follow, int 
 {
 	struct stat buf;
 	struct dir_ent *dir_ent;
+	int res;
 
 	if(appending)
 		root_dir = dir_scan1(pathname, "", paths, scan1_single_readdir, follow, keep, TRUE, TRUE, 1);
@@ -3690,7 +3705,8 @@ static squashfs_inode scan_single(char *pathname, int progress, int follow, int 
 	 * it to the root directory dir_info structure */
 	dir_ent = create_dir_entry("", NULL, pathname, scan1_opendir("", "", 0));
 
-	if(lstat(pathname, &buf) == -1)
+	res = follow ? stat(pathname, &buf) : lstat(pathname, &buf);
+	if(res == -1)
 		/* source directory has disappeared? */
 		BAD_ERROR("Cannot stat source directory %s because %s\n",
 						pathname, strerror(errno));
@@ -4998,7 +5014,7 @@ static char *walk_source(char *source, char **pathname, char **name)
 
 static struct dir_info *add_source(struct dir_info *sdir, char *source,
 		char *subpath, char *file, char **prefix,
-		struct pathnames *paths, unsigned int depth)
+		struct pathnames *paths, unsigned int depth, int follow)
 {
 	struct dir_info *sub;
 	struct dir_ent *entry;
@@ -5056,7 +5072,7 @@ static struct dir_info *add_source(struct dir_info *sdir, char *source,
 	if((strcmp(name, ".") == 0) || strcmp(name, "..") == 0)
 		BAD_ERROR("Source path can't have '.' or '..' embedded in it with -tarstyle/-cpiostyle[0]\n");
 
-	res = lstat(file, &buf);
+	res = follow || source[0] != '\0' ? stat(file, &buf) : lstat(file, &buf);
 	if (res == -1)
 		BAD_ERROR("Can't stat %s because %s\n", file, strerror(errno));
 
@@ -5123,7 +5139,7 @@ static struct dir_info *add_source(struct dir_info *sdir, char *source,
 				excluded(entry->name, paths, &new);
 				subpath = subpathname(entry);
 				sub = add_source(entry->dir, source, subpath,
-						file, prefix, new, depth + 1);
+					file, prefix, new, depth + 1, follow);
 				if(sub == NULL)
 					goto failed_match;
 				entry->dir = sub;
@@ -5183,7 +5199,7 @@ static struct dir_info *add_source(struct dir_info *sdir, char *source,
 			if(newsubpath == NULL)
 				newsubpath = subpathname(entry);
 			sub = add_source(NULL, source, newsubpath, file, prefix,
-								new, depth + 1);
+							new, depth + 1, follow);
 			if(sub == NULL)
 				goto failed_entry;
 			add_dir_entry(entry, sub, lookup_inode(&buf));
@@ -5218,7 +5234,8 @@ failed_match:
 }
 
 
-static struct dir_info *populate_tree(struct dir_info *dir, struct pathnames *paths)
+static struct dir_info *populate_tree(struct dir_info *dir,
+	struct pathnames *paths, int follow, int keep)
 {
 	struct dir_ent *entry;
 	struct dir_info *new;
@@ -5240,14 +5257,14 @@ static struct dir_info *populate_tree(struct dir_info *dir, struct pathnames *pa
 				cur_dev = entry->inode->buf.st_dev;
 				new = dir_scan1(pathname(entry),
 					subpathname(entry), newp, scan1_readdir,
-					FALSE, FALSE, TRUE, TRUE, dir->depth + 1);
+					follow, keep, TRUE, TRUE, dir->depth + 1);
 				if(new == NULL)
 					return NULL;
 
 				entry->dir = new;
 				new->dir_ent = entry;
 			} else {
-				new = populate_tree(entry->dir, newp);
+				new = populate_tree(entry->dir, newp, follow, keep);
 				if(new == NULL)
 					return NULL;
 			}
@@ -5340,7 +5357,7 @@ static char *get_next_filename()
 }
 
 
-static squashfs_inode process_source(int progress)
+static squashfs_inode process_source(int progress, int follow, int keep)
 {
 	int res, first = TRUE, same = FALSE;
 	char *filename, *prefix, *pathname;
@@ -5349,7 +5366,7 @@ static squashfs_inode process_source(int progress)
 	struct dir_info *new;
 
 	while((filename = get_next_filename())) {
-		new = add_source(root_dir, filename, "", NULL, &prefix, paths, 1);
+		new = add_source(root_dir, filename, "", NULL, &prefix, paths, 1, follow);
 
 		if(new) {
 			/* does argv[i] start from the same directory? */
@@ -5445,7 +5462,7 @@ static squashfs_inode process_source(int progress)
 	entry->dir = root_dir;
 	root_dir->dir_ent = entry;
 
-	root_dir = populate_tree(root_dir, paths);
+	root_dir = populate_tree(root_dir, paths, follow, keep);
 	if(root_dir == NULL)
 		BAD_ERROR("Failed to read directory hierarchy\n");
 
@@ -5551,15 +5568,16 @@ static int old_excluded(char *filename, struct stat *buf)
 			* sizeof(struct exclude_info)); \
 	exclude_paths[exclude].st_dev = buf.st_dev; \
 	exclude_paths[exclude++].st_ino = buf.st_ino;
-static int old_add_exclude(char *path)
+static int old_add_exclude(char *path, int follow)
 {
-	int i;
+	int i, res;
 	char *filename;
 	struct stat buf;
 
 	if(path[0] == '/' || strncmp(path, "./", 2) == 0 ||
 			strncmp(path, "../", 3) == 0) {
-		if(lstat(path, &buf) == -1) {
+		res = follow ? stat(path, &buf) : lstat(path, &buf);
+		if(res == -1) {
 			ERROR_START("Cannot stat exclude dir/file %s because "
 				"%s", path, strerror(errno));
 			ERROR_EXIT(", ignoring\n");
@@ -5571,7 +5589,8 @@ static int old_add_exclude(char *path)
 
 	for(i = 0; i < source; i++) {
 		ASPRINTF(&filename, "%s/%s", source_path[i], path);
-		if(lstat(filename, &buf) == -1) {
+		res = follow ? stat(path, &buf) : lstat(path, &buf);
+		if(res == -1) {
 			if(!(errno == ENOENT || errno == ENOTDIR)) {
 				ERROR_START("Cannot stat exclude dir/file %s "
 					"because %s", filename, strerror(errno));
@@ -5963,7 +5982,7 @@ int excluded(char *name, struct pathnames *paths, struct pathnames **new)
 }
 
 
-static void process_exclude_file(char *argv)
+static void process_exclude_file(char *argv, int follow)
 {
 	FILE *fd;
 	char buffer[MAX_LINE + 1]; /* overflow safe */
@@ -6010,7 +6029,7 @@ static void process_exclude_file(char *argv)
 			continue;
 
 		if(old_exclude)
-			old_add_exclude(filename);
+			old_add_exclude(filename, FALSE);
 		else
 			add_exclude(filename);
 	}
@@ -6792,6 +6811,19 @@ static void fix_file(char *filename)
 	res = ftruncate(fd, offset);
 	if(res == -1)
 		BAD_ERROR("Failed to truncate file \"%s\" because %s\n", filename, strerror(errno));
+}
+
+
+int convert_to_action(char *action, char *action_parm, char *test, char *parameter)
+{
+	char *str;
+	int res;
+
+	ASPRINTF(&str, "%s(%s)@%s(\"%s\")", action, action_parm, test, parameter);
+	res = parse_action(str, ACTION_LOG_NONE);
+	free(str);
+
+	return res;
 }
 
 
@@ -7632,7 +7664,7 @@ static int sqfstar(int argc, char *argv[])
 			 * Note presence of filename arg has already
 			 * been checked
 			 */
-			process_exclude_file(argv[++i]);
+			process_exclude_file(argv[++i], FALSE);
 		else if(option_with_arg(argv[i], sqfstar_option_table))
 			i++;
 	}
@@ -7785,6 +7817,11 @@ int main(int argc, char *argv[])
 	int repro_opt = FALSE;
 	int repro_time_opt = FALSE;
 	unsigned int repro_time;
+
+	/* Is Mksquashfs dereferencing symbolic links?  What happens to symbolic links
+	 * that can not be deferenced? */
+	int deref = FALSE;
+	int deref_keep = FALSE;
 
 	check_sqfs_cmdline(argc, argv);
 	check_pager();
@@ -8585,6 +8622,37 @@ int main(int argc, char *argv[])
 					!parse_number(argv[i], &overcommit, 2) ||
 					(overcommit > 100))
 				mksquashfs_option_help(argv[i - 1], "mksquashfs: -overcommit missing or invalid percentage: it should be 0 - 100%%\n");
+		} else if(strcmp(argv[i], "-dereference") == 0) {
+			if(tarfile)
+				BAD_ERROR("-dereference does not make sense reading tar files\n");
+			else if(cpiostyle)
+				BAD_ERROR("-dereference does not make sense with -cpiostyle options\n");
+			deref = TRUE;
+			deref_keep = FALSE;
+		} else if(strcmp(argv[i], "-deref") == 0) {
+			if(tarfile)
+				BAD_ERROR("-deref does not make sense reading tar files\n");
+			else if(cpiostyle)
+				BAD_ERROR("-deref does not make sense with -cpiostyle options\n");
+			else if(++i == argc)
+				mksquashfs_option_help(argv[i - 1], "mksquashfs: -deref missing response parameter\n");
+			else if(strcmp(argv[i], "keep") == 0)
+				deref_keep = TRUE;
+			else if(strcmp(argv[i], "delete") == 0)
+				deref_keep = FALSE;
+			else
+				mksquashfs_option_help(argv[i - 1], "mksquashfs: -deref parameter should be either \"keep\" or \"delete\"\n");
+			deref = TRUE;
+		} else if(strcmp(argv[i], "-deref-path") == 0) {
+			if(tarfile)
+				BAD_ERROR("-deref-path does not make sense reading tar files\n");
+			else if(cpiostyle)
+				BAD_ERROR("-deref-path does not make sense with -cpiostyle options\n");
+			else if(++i == argc)
+				mksquashfs_option_help(argv[i - 1], "mksquashfs: -deref-path missing pathname parameter\n");
+			res = convert_to_action("dereference", "delete", "pathname", argv[i]);
+			if(!res)
+				BAD_ERROR("Bug in -deref-path!\n");
 		} else
 			mksquashfs_invalid_option(argv[i]);
 	}
@@ -8808,7 +8876,8 @@ int main(int argc, char *argv[])
 			source_dev = MALLOC(source * sizeof(dev_t));
 
 		for(i = 0; i < source; i++) {
-			if(lstat(source_path[i], &source_buf) == -1) {
+			res = deref ?  stat(source_path[i], &source_buf) : lstat(source_path[i], &source_buf);
+			if(res == -1) {
 				fprintf(stderr, "Cannot stat source directory \"%s\" "
 					"because %s\n", source_path[i],
 					strerror(errno));
@@ -8897,7 +8966,7 @@ int main(int argc, char *argv[])
 				 * Note presence of filename arg has already
 				 * been checked
 				 */
-				process_exclude_file(argv[++i]);
+				process_exclude_file(argv[++i], deref);
 			else if(strcmp(argv[i], "-e") == 0)
 				break;
 			else if(option_with_arg(argv[i], option_table))
@@ -8910,7 +8979,7 @@ int main(int argc, char *argv[])
 			}
 			while(i < argc)
 				if(old_exclude)
-					old_add_exclude(argv[i++]);
+					old_add_exclude(argv[i++], deref);
 				else
 					add_exclude(argv[i++]);
 		}
@@ -9146,11 +9215,11 @@ int main(int argc, char *argv[])
 		if(tarfile)
 			inode = process_tar_file(progress);
 		else if(tarstyle || cpiostyle)
-			inode = process_source(progress);
+			inode = process_source(progress, deref, deref_keep);
 		else if(!source)
 			inode = no_sources(progress);
 		else
-			inode = dir_scan(S_ISDIR(source_buf.st_mode), progress, FALSE, FALSE);
+			inode = dir_scan(S_ISDIR(source_buf.st_mode), progress, deref, deref_keep);
 
 		sBlk.root_inode = inode;
 		sBlk.inodes = inode_count;
