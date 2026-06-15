@@ -42,9 +42,9 @@
 static char *unsquashfs_options[]={
 	/* extraction options */
 	"", "", "-dest", "-max-depth", "-excludes", "-exclude-list",
-	"-extract-file", "-exclude-file", "-match", "-follow-paths",
-	"-missing-paths", "-no-wildcards", "-regex", "-all-time",
-	"-cat", "-force", "-pf", "", "", "",
+	"-extract-file", "-exclude-file", "-match", "-follow-symlinks",
+	"-no-wildcards", "-regex", "-all-time", "-cat", "-force", "-pf", "", "",
+	"",
 	/* information options */
 	"-stat", "-max-depth", "-info", "-linfo", "-ls", "-lls", "-llnumeric",
 	"-lc", "-llc", "-full-precision", "-UTC", "-mkfs-time", "", "", "",
@@ -52,9 +52,9 @@ static char *unsquashfs_options[]={
 	"-no-xattrs", "-xattrs", "-xattrs-exclude", "-xattrs-include", "", "",
 	"",
 	/* runtime options */
-	"-version", "-processors", "-mem", "-mem-percent", "-quiet",
-	"-no-progress", "-percentage", "-ignore-errors", "-strict-errors",
-	"-no-exit-code", "", "", "",
+	"-version", "-processors", "-mem", "-mem-percent", "-mem-default",
+	"-quiet", "-no-progress", "-percentage", "-ignore-errors",
+	"-strict-errors", "-no-exit-code", "", "", "",
 	/* help options */
 	"-help", "-help-option", "-help-section", "-help-all", "-ho", "-hs",
 	"-ha", "-no-pager", "-cols", "", "", "",
@@ -65,8 +65,9 @@ static char *unsquashfs_options[]={
 
 static char *sqfscat_options[]={
 	/* runtime options */
-	"", "", "-version", "-processors", "-mem", "-mem-percent", "-offset",
-	"-ignore-errors", "-strict-errors", "-no-exit-code", "", "", "",
+	"", "", "-version", "-processors", "-mem", "-mem-percent",
+	"mem-default", "-offset", "-ignore-errors", "-strict-errors",
+	"-no-exit-code", "", "", "",
 	/* filter options */
 	"-no-wildcards", "-regex", "", "", "",
 	/* help options */
@@ -76,15 +77,15 @@ static char *sqfscat_options[]={
 
 static char *unsquashfs_args[]={
 	/* extraction options */
-	"", "", "", "", "", "", "<file>", "<file>", "", "", "", "", "",
-	"<time>", "", "", "<file>", "", "", "",
+	"", "", "", "", "", "", "<file>", "<file>", "", "", "", "", "<time>",
+	"", "", "<file>", "", "", "",
 	/* information options */
 	"", "<levels>", "", "", "", "", "", "", "", "", "", "", "", "", "",
 	/* xattrs options */
 	"", "", "<regex>", "<regex>", "", "", "",
 	/* runtime options */
 	"", "<number>", "<size>", "<percent>", "", "", "", "", "", "", "", "",
-	"",
+	"", "",
 	/* help options */
 	"", "<regex>", "<section>", "", "<regex>", "<section>", "", "",
 	"<width>", "", "", "",
@@ -95,8 +96,8 @@ static char *unsquashfs_args[]={
 
 static char *sqfscat_args[]={
 	/* runtime options */
-	"", "", "", "<number>", "<size>", "<percent>", "<bytes>", "", "", "",
-	"", "", "",
+	"", "", "", "<number>", "<size>", "<percent>", "", "<bytes>", "", "",
+	"", "", "", "",
 	/* filter options */
 	"", "", "", "", "",
 	/* help options */
@@ -121,23 +122,24 @@ static char *unsquashfs_text[]={
 		"when listing the filesystem\n",
 	"\t-max[-depth] <levels>\tdescend at most <levels> of directories when "
 		"extracting\n",
-	"\t-excludes\t\ttreat files on command line as exclude files\n",
-	"\t-ex[clude-list]\t\tlist of files to be excluded, terminated with "
-		"; e.g. file1 file2 ;\n",
-	"\t-extract-file <file>\tlist of directories or files to extract.  One "
-		"per line\n",
-	"\t-exclude-file <file>\tlist of directories or files to exclude.  One "
-		"per line\n",
-	"\t-match\t\t\tabort if any extract file does not match on anything, "
-		"and can not be resolved.  Implies -missing-symlinks\n",
-	"\t-follow[-paths]\t\tfollow/walk extract pathnames, and add all "
-		"files/symlinks needed to resolve them.  This is now default\n",
-	"\t-missing[-paths]\tunsquashfs will abort if any pathname can't be resolved in "
-		"-follow-paths\n",
+	"\t-excludes\t\ttreat files on command line as exclude pathnames\n",
+	"\t-ex[clude-list]\t\tlist of pathnames to be excluded, terminated "
+		"with ; e.g. -exclude-list a/b/c/file1 a/*.[ch] \\; (the ; "
+		"should be backslashed on most shells)\n",
+	"\t-extract-file <file>\t<file> contains a list of pathnames to "
+		"extract.  One per line\n",
+	"\t-exclude-file <file>\t<file> contains a list of pathnames to "
+		"exclude.  One per line\n",
+	"\t-match\t\t\tabort if any extract or exclude pathname does not match "
+		"on anything, and can not be resolved\n",
+	"\t-follow[-symlinks]\tfollow symbolic links in extract pathnames, "
+		"and extract the files they point to, in addition to the "
+		"symbolic link itself.\n",
 	"\t-no-wild[cards]\t\tdo not use wildcard matching in extract and "
-		"exclude names\n",
-	"\t-r[egex]\t\ttreat extract names as POSIX regular expressions rather "
-		"than use the default shell wildcard expansion (globbing)\n",
+		"exclude pathnames\n",
+	"\t-r[egex]\t\ttreat extract and exclude pathnames as POSIX regular "
+		"expressions rather than use the default shell wildcard "
+		"expansion (globbing)\n",
 	"\t-all[-time] <time>\tset all file timestamps to <time>, rather than "
 		"the time stored in the filesystem inode.  <time> can be an "
 		"unsigned 32-bit int indicating seconds since the epoch "
@@ -189,8 +191,9 @@ static char *unsquashfs_text[]={
 		"use the number of processors available\n",
 	"\t-mem <size>\t\tuse <size> physical memory for caches.  Use K, M or "
 		"G to specify Kbytes, Mbytes or Gbytes respectively.  Default "
-		"512 Mbytes\n",
+		"512 Mbytes if physical memory >= 2Gbytes, or 25% if less\n",
 	"\t-mem-percent <percent>\tuse <percent> physical memory for caches.\n",
+	"\t-mem-default\t\tprint default memory usage in Mbytes\n",
 	"\t-q[uiet]\t\tno verbose output\n",
 	"\t-n[o-progress]\t\tdo not display the progress bar\n",
 	"\t-percentage\t\tdisplay a percentage rather than the full progress "
@@ -269,8 +272,9 @@ static char *sqfscat_text[]={
 		"use the number of processors available\n",
 	"\t-mem <size>\t\tuse <size> physical memory for caches.  Use K, M or "
 		"G to specify Kbytes, Mbytes or Gbytes respectively.  Default "
-		"512 Mbytes\n",
+		"512 Mbytes if physical memory >= 2Gbytes, or 25% if less\n",
 	"\t-mem-percent <percent>\tuse <percent> physical memory for caches.\n",
+	"\t-mem-default\t\tprint default memory usage in Mbytes\n",
 	"\t-o[ffset] <bytes>\tskip <bytes> at start of FILESYSTEM.  Optionally "
 		"a suffix of K, M or G can be given to specify Kbytes, Mbytes "
 		"or Gbytes respectively (default 0 bytes).\n",

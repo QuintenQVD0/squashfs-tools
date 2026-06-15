@@ -41,6 +41,7 @@
 #include "alloc.h"
 #include "crc16.h"
 #include "merge_sort.h"
+#include "uid_gid.h"
 
 #ifdef __linux__
 #include <sys/sysmacros.h>
@@ -88,16 +89,16 @@ int ignore_errors = FALSE;
 int strict_errors = FALSE;
 int use_localtime = TRUE;
 int max_depth = -1; /* unlimited */
+int leaf_symlink = FALSE;
 int missing_paths = FALSE;
 int no_wildcards = FALSE;
 int set_exit_code = TRUE;
 int treat_as_excludes = FALSE;
 int stat_sys = FALSE;
-int version = FALSE;
 int mkfs_time_opt = FALSE;
 int cat_files = FALSE;
-int fragment_buffer_size = FRAGMENT_BUFFER_DEFAULT;
-int data_buffer_size = DATA_BUFFER_DEFAULT;
+int fragment_buffer_size;
+int data_buffer_size;
 char *dest = "squashfs-root";
 struct pathname *extract = NULL, *exclude = NULL, *stickypath = NULL;
 int writer_fd = 1;
@@ -107,6 +108,10 @@ char *pseudo_name;
 unsigned int timeval;
 int time_opt = FALSE;
 int full_precision = FALSE;
+int global_uid_opt = FALSE;
+uid_t global_uid;
+int global_gid_opt = FALSE;
+gid_t global_gid;
 
 /* extended attribute flags */
 int no_xattrs = XATTR_DEF;
@@ -158,10 +163,10 @@ static struct test table[] = {
 
 /* list of options that have an argument */
 static char *option_table[] = { "d", "dest", "max", "max-depth", "extract-file",
-	"exclude_file", "all", "all-time", "pf", "xattrs-exclude",
+	"exclude-file", "all", "all-time", "pf", "xattrs-exclude",
 	"xattrs-include", "p", "processors", "mem", "mem-percent", "h", "help",
 	"help-option", "help-section", "ho", "hs", "o", "offset", "e", "ef",
-	"exc", "excf", "pseudo-file", "cols", NULL
+	"exc", "excf", "pseudo-file", "cols", "force-uid", "force-gid", NULL
 };
 
 static char *sqfscat_option_table[] = { "p", "processors", "mem", "mem-percent",
@@ -851,9 +856,11 @@ int read_directory_data(void *buffer, long long *blk, unsigned int *off, int len
 }
 
 
-static int set_attributes(char *pathname, int mode, uid_t uid, gid_t guid, time_t time,
+static int set_attributes(char *pathname, int mode, uid_t _uid, gid_t _gid, time_t time,
 	unsigned int xattr, unsigned int set_mode)
 {
+	uid_t uid = global_uid_opt ? global_uid : _uid;
+	gid_t gid = global_gid_opt ? global_gid : _gid;
 	struct utimbuf times = { time, time };
 	int failed = FALSE;
 
@@ -864,7 +871,7 @@ static int set_attributes(char *pathname, int mode, uid_t uid, gid_t guid, time_
 	}
 
 	if(root_process) {
-		if(chown(pathname, uid, guid) == -1) {
+		if(chown(pathname, uid, gid) == -1) {
 			EXIT_UNSQUASH_STRICT("set_attributes: failed to change"
 				" uid and gids on %s, because %s\n", pathname,
 				strerror(errno));
@@ -1254,7 +1261,10 @@ static int create_inode(char *pathname, struct inode *i)
 			}
 
 			if(root_process) {
-				res = lchown(pathname, i->uid, i->gid);
+				uid_t uid = global_uid_opt ? global_uid: i->uid;
+				gid_t gid = global_gid_opt ? global_gid: i->gid;
+
+				res = lchown(pathname, uid, gid);
 				if(res == -1) {
 					EXIT_UNSQUASH_STRICT("create_inode: "
 						"failed to change uid and "
@@ -2392,6 +2402,17 @@ static int follow_extract_paths(char *path, char *newpath, int symlinks,
 					break;
 				}
 
+				/*
+				 * Do not walk the symbolic link if it is the
+				 * leaf and so extract the symbolic link rather
+				 * than what it points to
+				 */
+				if(path[0] == '\0' && !leaf_symlink) {
+					add_to_extracts(stack, name);
+					traversed = TRUE;
+					break;
+				}
+
 				new = clone_stack(stack);
 
 				/* Add symlink to list of symlinks found
@@ -2887,10 +2908,14 @@ static int dir_scan(char *parent_name, unsigned int start_block, unsigned int of
 		 * write/execute permission.  These are fixed up later in
 		 * set_attributes().
 		 */
-		int res = mkdir(parent_name, S_IRUSR|S_IWUSR|S_IXUSR);
-		if(res == -1) {
+		while(1) {
+			struct stat buf;
+			int res = mkdir(parent_name, S_IRUSR|S_IWUSR|S_IXUSR);
+			if(res != -1)
+				break;
+
 			/*
-			 * Skip directory if mkdir fails, unless we're
+			 * Skip directory because mkdir failed, unless we're
 			 * forcing and the error is -EEXIST
 			 */
 			if((depth != 1 && !force) || errno != EEXIST) {
@@ -2901,18 +2926,41 @@ static int dir_scan(char *parent_name, unsigned int start_block, unsigned int of
 				return FALSE;
 			} 
 
-			/*
-			 * Try to change permissions of existing directory so
-			 * that we can write to it
-			 */
-			res = chmod(parent_name, S_IRUSR|S_IWUSR|S_IXUSR);
-			if (res == -1) {
+			res = lstat(parent_name, &buf);
+			if(res == -1) {
 				EXIT_UNSQUASH_IGNORE("dir_scan: failed to "
-					"change permissions for directory %s,"
+					"lstat existing directory %s,"
 					" because %s\n", parent_name,
 					strerror(errno));
 				squashfs_closedir(dir);
 				return FALSE;
+			}
+
+			if(S_ISDIR(buf.st_mode)) {
+				/*
+				 * Try to change permissions of existing directory so
+				 * that we can write to it
+				 */
+				res = chmod(parent_name, S_IRUSR|S_IWUSR|S_IXUSR);
+				if (res == -1) {
+					EXIT_UNSQUASH_IGNORE("dir_scan: failed to "
+						"change permissions for directory %s,"
+						" because %s\n", parent_name,
+						strerror(errno));
+					squashfs_closedir(dir);
+					return FALSE;
+				}
+				break;
+			} else {
+				/* Try to delete existing non-directory */
+				res = unlink(parent_name);
+				if(res == -1) {
+					EXIT_UNSQUASH_IGNORE("dir_scan: failed to delete "
+						"existing file %s, because %s\n",
+						parent_name, strerror(errno));
+					squashfs_closedir(dir);
+					return FALSE;
+				}
 			}
 		}
 	}
@@ -4551,6 +4599,7 @@ static void print_version(char *string)
 	printf("but WITHOUT ANY WARRANTY; without even the implied warranty of\n");
 	printf("MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the\n");
 	printf("GNU General Public License for more details.\n");
+	exit(0);
 }
 
 
@@ -4590,11 +4639,12 @@ static int parse_cat_options(int argc, char *argv[])
 			i++;
 	}
 
+	/* Scan the command line for options that will immediately quit afterwards */
 	for(i = 1; i < argc && *argv[i] == '-'; i++) {
-		if(strcmp(argv[i], "-no-pager") == 0)
-			; /* ignore, already parsed */
-		else if(strcmp(argv[i], "-cols") == 0)
-			i++; /* already parsed */
+		if(strcmp(argv[i], "-version") == 0 ||
+				strcmp(argv[i], "-v") == 0 ||
+				strcmp(argv[i], "--version") == 0)
+			print_version("sqfscat");
 		else if(strcmp(argv[i], "-help") == 0 || strcmp(argv[i], "-h") == 0)
 			sqfscat_help(NULL);
 		else if(strcmp(argv[i], "-help-all") == 0 || strcmp(argv[i], "-ha") == 0)
@@ -4605,9 +4655,20 @@ static int parse_cat_options(int argc, char *argv[])
 			sqfscat_option(argv[i - 1], argv[i]);
 		} else if(strcmp(argv[i], "-help-section") == 0 || strcmp(argv[i], "-hs") == 0) {
 			if(++i == argc)
-				sqfscat_option_help(argv[i - 1], "sqfscat %s missing section\n", argv[i - 1]);
+				sqfscat_option_help(argv[i - 1], "sqfscat: %s missing section\n", argv[i - 1]);
 			sqfscat_section(argv[i - 1], argv[i]);
-		} else if(strcmp(argv[i], "-no-exit-code") == 0 ||
+		} else if(strcmp(argv[i], "-mem-default") == 0) {
+			printf("%d\n", fragment_buffer_size + data_buffer_size);
+			exit(0);
+		} else if(option_with_arg(argv[i], option_table))
+			i++;
+	}
+	for(i = 1; i < argc && *argv[i] == '-'; i++) {
+		if(strcmp(argv[i], "-no-pager") == 0)
+			; /* ignore, already parsed */
+		else if(strcmp(argv[i], "-cols") == 0)
+			i++; /* already parsed */
+		else if(strcmp(argv[i], "-no-exit-code") == 0 ||
 				strcmp(argv[i], "-no-exit") == 0)
 			set_exit_code = FALSE;
 		else if(strcmp(argv[i], "-no-wildcards") == 0 ||
@@ -4619,12 +4680,7 @@ static int parse_cat_options(int argc, char *argv[])
 		else if(strcmp(argv[i], "-ignore-errors") == 0 ||
 				strcmp(argv[i], "-ig") == 0)
 			ignore_errors = TRUE;
-		else if(strcmp(argv[i], "-version") == 0 ||
-				strcmp(argv[i], "-v") == 0 ||
-				strcmp(argv[i], "--version") == 0) {
-			print_version("sqfscat");
-			version = TRUE;
-		} else if(strcmp(argv[i], "-processors") == 0 ||
+		else if(strcmp(argv[i], "-processors") == 0 ||
 				strcmp(argv[i], "-p") == 0) {
 			if((++i == argc) ||
 					!parse_number(argv[i],
@@ -4738,12 +4794,9 @@ static int parse_cat_options(int argc, char *argv[])
 	if(no_wildcards && use_regex)
 		EXIT_UNSQUASH("Both -no-wildcards and -regex should not be "
 								"set\n");
-	if(i == argc) {
-		if(!version)
-			sqfscat_help("sqfscat: fatal error: no input filesystem specified on command line\n\n");
-		else
-			exit(1);
-	} else if(i + 1 == argc)
+	if(i == argc)
+		sqfscat_help("sqfscat: fatal error: no input filesystem specified on command line\n\n");
+	else if(i + 1 == argc)
 		sqfscat_help("sqfscat: fatal error: no files specified on command line\n\n");
 
 	return i;
@@ -4769,11 +4822,12 @@ static int parse_options(int argc, char *argv[])
 			i++;
 	}
 
+	/* Scan the command line for options that will immediately quit afterwards */
 	for(i = 1; i < argc && *argv[i] == '-'; i++) {
-		if(strcmp(argv[i], "-no-pager") == 0)
-			; /* ignore, already parsed */
-		else if(strcmp(argv[i], "-cols") == 0)
-			i++; /* already parsed */
+		if(strcmp(argv[i], "-version") == 0 ||
+				strcmp(argv[i], "-v") == 0 ||
+				strcmp(argv[i], "--version") == 0)
+			print_version("unsquashfs");
 		else if(strcmp(argv[i], "-help") == 0 || strcmp(argv[i], "-h") == 0)
 			unsquashfs_help(NULL);
 		else if(strcmp(argv[i], "-help-all") == 0 || strcmp(argv[i], "-ha") == 0)
@@ -4786,12 +4840,50 @@ static int parse_options(int argc, char *argv[])
 			if(++i == argc)
 				unsquashfs_option_help(argv[i - 1], "unsquashfs: %s missing section\n", argv[i - 1]);
 			unsquashfs_section(argv[i - 1], argv[i]);
-		} else if(strcmp(argv[i], "-pseudo-file") == 0 ||
+		} else if(strcmp(argv[i], "-mem-default") == 0) {
+			printf("%d\n", fragment_buffer_size + data_buffer_size);
+			exit(0);
+		} else if(option_with_arg(argv[i], option_table))
+			i++;
+	}
+
+	for(i = 1; i < argc && *argv[i] == '-'; i++) {
+		if(strcmp(argv[i], "-no-pager") == 0)
+			; /* ignore, already parsed */
+		else if(strcmp(argv[i], "-cols") == 0)
+			i++; /* already parsed */
+		else if(strcmp(argv[i], "-pseudo-file") == 0 ||
 				strcmp(argv[i], "-pf") == 0) {
 			if(++i == argc)
 				unsquashfs_option_help(argv[i - 1], "unsquashfs: -pf missing filename\n");
 			pseudo_name = argv[i];
 			pseudo_file = TRUE;
+		} else if(strcmp(argv[i], "-force-uid") == 0) {
+			if(!root_process)
+				unsquashfs_option_help("-force-uid", "unsquashfs: force-uid can only be used running as superuser\n");
+			if(++i == argc)
+				unsquashfs_option_help("-force-uid", "unsquashfs: force-uid missing uid or user name\n");
+			res = get_uid_from_arg(argv[i], &global_uid);
+			if(res) {
+				if(res == -2)
+					unsquashfs_option_help("-force-uid", "unsquashfs: -force-uid uid out of range\n");
+				else
+					unsquashfs_option_help("-force-uid", "unsquashfs: -force-uid invalid uid or unknown user name\n");
+			}
+			global_uid_opt = TRUE;
+		} else if(strcmp(argv[i], "-force-gid") == 0) {
+			if(!root_process)
+				unsquashfs_option_help("-force-gid", "unsquashfs: force-gid can only be used running as superuser\n");
+			if(++i == argc)
+				unsquashfs_option_help("-force-gid", "unsquashfs: force-gid missing gid or group name\n");
+			res = get_gid_from_arg(argv[i], &global_gid);
+			if(res) {
+				if(res == -2)
+					unsquashfs_option_help("-force-gid", "unsquashfs: -force-gid gid out of range\n");
+				else
+					unsquashfs_option_help("-force-gid", "unsquashfs: -force-gid invalid gid or unknown group name\n");
+			}
+			global_gid_opt = TRUE;
 		} else if(strcmp(argv[i], "-cat") == 0)
 			cat_files = TRUE;
 		else if(strcmp(argv[i], "-excludes") == 0)
@@ -4805,10 +4897,11 @@ static int parse_options(int argc, char *argv[])
 		} else if(strcmp(argv[i], "-no-exit-code") == 0 ||
 				strcmp(argv[i], "-no-exit") == 0)
 			set_exit_code = FALSE;
-		else if(strcmp(argv[i], "-follow-paths") == 0 ||
+		else if(strcmp(argv[i], "-follow-symlink") == 0 ||
 				strcmp(argv[i], "-follow") == 0 ||
 				strcmp(argv[i], "-L") == 0 ||
 				strcmp(argv[i], "-follow-symlinks") == 0) {
+			leaf_symlink = TRUE;
 			; // now default, option retained for backwards compatibility
 		} else if(strcmp(argv[i], "missing-paths") == 0 ||
 				strcmp(argv[i], "-missing") == 0 ||
@@ -4829,12 +4922,7 @@ static int parse_options(int argc, char *argv[])
 		else if(strcmp(argv[i], "-quiet") == 0 ||
 				strcmp(argv[i], "-q") == 0)
 			quiet = TRUE;
-		else if(strcmp(argv[i], "-version") == 0 ||
-				strcmp(argv[i], "-v") == 0 ||
-				strcmp(argv[i], "--version") == 0) {
-			print_version("unsquashfs");
-			version = TRUE;
-		} else if(strcmp(argv[i], "-info") == 0 ||
+		else if(strcmp(argv[i], "-info") == 0 ||
 				strcmp(argv[i], "-i") == 0)
 			info = TRUE;
 		else if(strcmp(argv[i], "-ls") == 0 ||
@@ -5104,12 +5192,8 @@ static int parse_options(int argc, char *argv[])
 	progress = FALSE;
 #endif
 
-	if(i == argc) {
-		if(!version)
-			unsquashfs_help("unsquashfs: fatal error: no input filesystem specified on command line\n\n");
-		else
-			exit(1);
-	}
+	if(i == argc)
+		unsquashfs_help("unsquashfs: fatal error: no input filesystem specified on command line\n\n");
 
 	return i;
 }
@@ -5131,13 +5215,29 @@ static void parse_filter_options(int argc, char *argv[])
 		else if(strcmp(argv[i], "-exclude-file") == 0 ||
 				strcmp(argv[i], "-excf") == 0 ||
 				strcmp(argv[i], "-exc") == 0)
-			process_exclude_files(argv[i]);
+			process_exclude_files(argv[++i]);
 		else if(strcmp(argv[i], "-exclude-list") == 0 ||
 				strcmp(argv[i], "-ex") == 0)
 			i += parse_excludes(argc - i - 1, argv + i + 1) + 1;
 		else if(option_with_arg(argv[i], option_table))
 			i++;
 	}
+}
+
+
+/* default size of fragment buffer and data buffer in Mbytes */
+static int default_buffers()
+{
+	int mem = get_physical_memory();
+
+	/*
+	 * Use 256Mbytes unless total memory is less than 2G, in which case
+	 * use 12.5% of total memory
+	 */
+	if(mem < 2048)
+		return mem >> 3 ? mem >> 3 : 1;
+	else
+		return 256;
 }
 
 
@@ -5148,6 +5248,8 @@ int main(int argc, char *argv[])
 	int exit_code = 0;
 	char *command;
 
+	fragment_buffer_size = default_buffers();
+	data_buffer_size = default_buffers();
 	check_sqfs_cmdline(argc, argv);
 	check_pager();
 

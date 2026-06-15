@@ -82,6 +82,7 @@
 #include "limit.h"
 #include "alloc.h"
 #include "virt_disk_pos.h"
+#include "uid_gid.h"
 
 /* Compression options */
 int noF = FALSE;
@@ -5589,7 +5590,7 @@ static int old_add_exclude(char *path, int follow)
 
 	for(i = 0; i < source; i++) {
 		ASPRINTF(&filename, "%s/%s", source_path[i], path);
-		res = follow ? stat(path, &buf) : lstat(path, &buf);
+		res = follow ? stat(filename, &buf) : lstat(filename, &buf);
 		if(res == -1) {
 			if(!(errno == ENOENT || errno == ENOTDIR)) {
 				ERROR_START("Cannot stat exclude dir/file %s "
@@ -6664,66 +6665,6 @@ static int option_with_arg(char *string, char *table[])
 		return TRUE;
 
 	return compressor_option_args(comp, string);
-}
-
-
-static int get_uid_from_arg(char *arg, unsigned int *uid)
-{
-	char *last;
-	long long res;
-
-	res = strtoll(arg, &last, 10);
-	if(*last == '\0') {
-		if(res < 0 || res > (((long long) 1 << 32) - 1))
-			return -2;
-
-		*uid = res;
-		return 0;
-	} else {
-		struct passwd *id;
-
-		for(;;) {
-			errno = 0;
-			id = getpwnam(arg);
-			if(id) {
-				*uid = id->pw_uid;
-				return 0;
-			} else if(errno != EINTR)
-				break;
-		}
-	}
-
-	return -1;
-}
-
-
-static int get_gid_from_arg(char *arg, unsigned int *gid)
-{
-	char *last;
-	long long res;
-
-	res = strtoll(arg, &last, 10);
-	if(*last == '\0') {
-		if(res < 0 || res > (((long long) 1 << 32) - 1))
-			return -2;
-
-		*gid = res;
-		return 0;
-	} else {
-		struct group *id;
-
-		for(;;) {
-			errno = 0;
-			id = getgrnam(arg);
-			if(id) {
-				*gid = id->gr_gid;
-				return 0;
-			} else if(errno != EINTR)
-				break;
-		}
-	}
-
-	return -1;
 }
 
 
