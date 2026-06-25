@@ -45,6 +45,9 @@ static char *unsquashfs_options[]={
 	"-extract-file", "-exclude-file", "-match", "-follow-symlinks",
 	"-no-wildcards", "-regex", "-all-time", "-cat", "-force", "-pf", "", "",
 	"",
+	/* permissions */
+	"-force-uid", "-force-gid", "-force-file-mode", "-force-dir-mode", "",
+	"", "",
 	/* information options */
 	"-stat", "-max-depth", "-info", "-linfo", "-ls", "-lls", "-llnumeric",
 	"-lc", "-llc", "-full-precision", "-UTC", "-mkfs-time", "", "", "",
@@ -77,8 +80,10 @@ static char *sqfscat_options[]={
 
 static char *unsquashfs_args[]={
 	/* extraction options */
-	"", "", "", "", "", "", "<file>", "<file>", "", "", "", "", "<time>",
-	"", "", "<file>", "", "", "",
+	"", "", "<pathname>", "<levels>", "", "", "<file>", "<file>", "", "",
+	"", "", "<time>", "", "", "<file>", "", "", "",
+	/* permissions */
+	"<user>", "group>", "<mode>", "<mode>", "", "", "",
 	/* information options */
 	"", "<levels>", "", "", "", "", "", "", "", "", "", "", "", "", "",
 	/* xattrs options */
@@ -106,8 +111,9 @@ static char *sqfscat_args[]={
 };
 
 static char *unsquashfs_sections[]={
-	"extraction", "information", "xattrs", "runtime", "help", "misc",
-	"environment", "exit", "extra", "decompressors", NULL
+	"extraction", "permissions", "information", "xattrs", "runtime", "help",
+	"misc", "symbolic", "environment", "exit", "extra", "decompressors",
+	NULL
 };
 
 static char *sqfscat_sections[]={
@@ -124,7 +130,7 @@ static char *unsquashfs_text[]={
 		"extracting\n",
 	"\t-excludes\t\ttreat files on command line as exclude pathnames\n",
 	"\t-ex[clude-list]\t\tlist of pathnames to be excluded, terminated "
-		"with ; e.g. -exclude-list a/b/c/file1 a/*.[ch] \\; (the ; "
+		"with ; e.g. -exclude-list a/b/c/file1 \"a/*.[ch]\" \\; (the ; "
 		"should be backslashed on most shells)\n",
 	"\t-extract-file <file>\t<file> contains a list of pathnames to "
 		"extract.  One per line\n",
@@ -153,6 +159,19 @@ static char *unsquashfs_text[]={
 		"already exist before extracting to them\n",
 	"\t-pf <file>\t\toutput a pseudo file equivalent of the input Squashfs "
 		"filesystem, use - for stdout\n",
+	"\n", "Filesystem permissions options:", "\n",
+	"\t-force-uid <user>\tset all file and directory uids to specified "
+		"<user>, <user> can be either an integer uid or user name "
+		"(superuser only)\n",
+	"\t-force-gid <group>\tset all file and directory gids to specified "
+		"<group>, <group> can be either an integer gid or group "
+		"name (superuser only)\n",
+	"\t-force-file-mode <mode>\tset all file (non-directory) permissions "
+		"to <mode>.  <Mode> can be symbolic or octal (see section "
+		"Symbolic mode specification)\n",
+	"\t-force-dir-mode <mode>\tset all directory permissions to <mode>.  "
+		"<Mode> can be symbolic or octal (see section Symbolic mode "
+		"specification)\n",
 	"\n", "Filesystem information and listing options:", "\n",
 	"\t-s[tat]\t\t\tdisplay filesystem superblock information\n",
 	"\t-max[-depth] <levels>\tdescend at most <levels> of directories when "
@@ -231,6 +250,29 @@ static char *unsquashfs_text[]={
 	"\t-exc[f] <exclude file>\tsynonym for -exclude-file\n",
 	"\t-L\t\t\tsynonym for -follow-symlinks\n",
 	"\t-pseudo-file <file>\talternative name for -pf\n",
+	"\n", "Symbolic mode specification:", "\n",
+	"The symbolic mode is of the format [ugoa]*[[+-=]PERMS]+.  PERMS = "
+		"[rwxXst]+ or [ugo], and the sequence can be repeated "
+		"separated with commas.\n\n",
+	"A combination of the letters ugoa specify which permission bits will "
+		"be affected, u means user, g means group, o means other, and "
+		"a means all or ugo.\n\n",
+	"The next letter is +, - or =.  The letter + means add to the existing "
+		"permission bits, - means remove the bits from the existing "
+		"permission bits, and = means set the permission bits.\n\n",
+	"The permission bits (PERMS) are a combination of [rwxXst] which "
+		"sets/adds/removes those bits for the specified ugoa "
+		"combination, r means read, w means write and x means execute "
+		"for files or search for directories.  X has a special "
+		"meaning, if the file is a directory it is equivalent to x or "
+		"search, but if it is a non-directory, it only takes effect if "
+		"execute is already set for user, group or other.  The s flag "
+		"sets user or group ID on execution, and the t flag on a "
+		"directory sets restricted deletion, or historically made the "
+		"file sticky if a non-directory.\n\n",
+		"The permission bits can also be u, g or o, which takes the "
+			"permission bits from the user, group or other of the "
+			"file respectively.\n",
 	"\n", "Environment:", "\n",
 	"\tSQFS_CMDLINE \t\tIf set, this is used as the directory to write the "
 		"file sqfs_cmdline which contains the command line arguments "

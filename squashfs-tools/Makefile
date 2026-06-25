@@ -202,22 +202,13 @@ INSTALL_MANPAGES_DIR = $(INSTALL_PREFIX)/share/man/man1
 #
 # LZMA1 compression.
 #
-# LZMA1 compression is obsolete, and the newer and better XZ (LZMA2)
-# compression should be used in preference.
-#
-# Both XZ Utils liblzma (https://tukaani.org/xz/) and LZMA SDK
-# (http://www.7-zip.org/sdk.html) are supported
+# LZMA1 compression is obsolete and is not supported by the kernel.  The newer
+# and better XZ (LZMA2) compression should be used in preference.
 #
 # To build using XZ Utils liblzma - install the library and uncomment
 # the LZMA_XZ_SUPPORT line below.
 #
-# To build using the LZMA SDK (4.65 used in development, other versions may
-# work) - download and unpack it, uncomment and set LZMA_DIR to unpacked source,
-# and uncomment the LZMA_SUPPORT line below.
-#
 #LZMA_XZ_SUPPORT = 1
-#LZMA_SUPPORT = 1
-#LZMA_DIR = ../../../../LZMA/lzma465
 else
 GZIP_SUPPORT ?= 1
 XZ_SUPPORT ?= 1
@@ -233,8 +224,6 @@ INSTALL_PREFIX ?= /usr/local
 INSTALL_DIR ?= $(INSTALL_PREFIX)/bin
 INSTALL_MANPAGES_DIR ?= $(INSTALL_PREFIX)/man/man1
 LZMA_XZ_SUPPORT ?= 0
-LZMA_SUPPORT ?= 0
-LZMA_DIR ?= ../../../../LZMA/lzma465
 XZ_EXTENDED_OPTIONS ?= 0
 DONT_USE_ATOMIC_EXCHANGE_N ?= 0
 SINGLE_READER_THREAD ?= 0
@@ -258,7 +247,8 @@ MKSQUASHFS_OBJS = mksquashfs.o read_fs.o action.o swap.o pseudo.o compressor.o \
 UNSQUASHFS_OBJS = unsquashfs.o unsquash-1.o unsquash-2.o unsquash-3.o \
 	unsquash-4.o unsquash-123.o unsquash-34.o unsquash-1234.o unsquash-12.o \
 	swap.o compressor.o unsquashfs_info.o date.o memory.o print_pager.o \
-	unsquashfs_help.o nprocessors_compat.o limit.o crc16.o uid_gid.o
+	unsquashfs_help.o nprocessors_compat.o limit.o crc16.o uid_gid.o \
+	symbolic_mode.o
 
 CFLAGS ?= -O2
 CFLAGS += $(EXTRA_CFLAGS) $(INCLUDEDIR) -D_FILE_OFFSET_BITS=64 \
@@ -331,20 +321,6 @@ COMPRESSORS += zstd
 endif
 endif
 
-ifeq ($(LZMA_SUPPORT),1)
-LZMA_OBJS = $(LZMA_DIR)/C/Alloc.o $(LZMA_DIR)/C/LzFind.o \
-	$(LZMA_DIR)/C/LzmaDec.o $(LZMA_DIR)/C/LzmaEnc.o $(LZMA_DIR)/C/LzmaLib.o
-INCLUDEDIR += -I$(LZMA_DIR)/C
-CFLAGS += -DLZMA_SUPPORT
-MKSQUASHFS_OBJS += lzma_wrapper.o $(LZMA_OBJS)
-UNSQUASHFS_OBJS += lzma_wrapper.o $(LZMA_OBJS)
-ifeq ($(COMP_DEFAULT),lzma)
-COMPRESSORS += lzma@(default)
-else
-COMPRESSORS += lzma
-endif
-endif
-
 ifeq ($(LZMA_XZ_SUPPORT),1)
 CFLAGS += -DLZMA_SUPPORT
 MKSQUASHFS_OBJS += lzma_xz_wrapper.o
@@ -398,23 +374,6 @@ ifeq ($(shell [ $(BLOCK_READER_THREADS) -le 0 ] && echo Y),Y)
 $(error BLOCK_READER_THREADS should not be negative or 0!)
 endif
 CFLAGS += -DSMALL_READER_THREADS=$(SMALL_READER_THREADS) -DBLOCK_READER_THREADS=$(BLOCK_READER_THREADS)
-endif
-
-# If LZMA_SUPPORT is specified then LZMA_DIR must be specified too
-#
-ifeq ($(LZMA_SUPPORT),1)
-ifndef LZMA_DIR
-$(error "LZMA_SUPPORT requires LZMA_DIR to be also defined")
-endif
-endif
-
-#
-# Both LZMA_XZ_SUPPORT and LZMA_SUPPORT cannot be specified
-#
-ifeq ($(LZMA_XZ_SUPPORT),1)
-ifeq ($(LZMA_SUPPORT),1)
-$(error "Both LZMA_XZ_SUPPORT and LZMA_SUPPORT cannot be specified")
-endif
 endif
 
 #
@@ -530,8 +489,6 @@ memory.o: error.h memory_compat.h memory.h
 symbolic_mode.o: symbolic_mode.h symbolic_mode.c
 
 gzip_wrapper.o: gzip_wrapper.c squashfs_fs.h gzip_wrapper.h compressor.h
-
-lzma_wrapper.o: lzma_wrapper.c compressor.h squashfs_fs.h
 
 lzma_xz_wrapper.o: lzma_xz_wrapper.c compressor.h squashfs_fs.h
 

@@ -42,6 +42,7 @@
 #include "crc16.h"
 #include "merge_sort.h"
 #include "uid_gid.h"
+#include "symbolic_mode.h"
 
 #ifdef __linux__
 #include <sys/sysmacros.h>
@@ -112,6 +113,10 @@ int global_uid_opt = FALSE;
 uid_t global_uid;
 int global_gid_opt = FALSE;
 gid_t global_gid;
+int global_file_mode_opt = FALSE;
+struct mode_data *global_file_mode;
+int global_dir_mode_opt = FALSE;
+struct mode_data *global_dir_mode;
 
 /* extended attribute flags */
 int no_xattrs = XATTR_DEF;
@@ -166,7 +171,8 @@ static char *option_table[] = { "d", "dest", "max", "max-depth", "extract-file",
 	"exclude-file", "all", "all-time", "pf", "xattrs-exclude",
 	"xattrs-include", "p", "processors", "mem", "mem-percent", "h", "help",
 	"help-option", "help-section", "ho", "hs", "o", "offset", "e", "ef",
-	"exc", "excf", "pseudo-file", "cols", "force-uid", "force-gid", NULL
+	"exc", "excf", "pseudo-file", "cols", "force-uid", "force-gid",
+	"force-file-mode", "force-dir-mode", NULL
 };
 
 static char *sqfscat_option_table[] = { "p", "processors", "mem", "mem-percent",
@@ -1069,13 +1075,25 @@ static void unlink_file(char *pathname, struct stat *stat_buf)
 }
 
 
+static inline int process_file_mode(int mode)
+{
+	return global_file_mode_opt ? mode_execute(global_file_mode, mode) : mode;
+}
+
+
+static inline int process_dir_mode(int mode)
+{
+	return global_dir_mode_opt ? mode_execute(global_dir_mode, mode) : mode;
+}
+
+
 static int write_file(struct inode *inode, char *pathname)
 {
 	unsigned int file_fd, i;
 	unsigned int *block_list = NULL;
 	int file_end = inode->data / block_size, res;
 	long long start = inode->start;
-	mode_t mode = inode->mode;
+	mode_t mode = process_file_mode(inode->mode);
 	struct stat buf;
 
 	TRACE("write_file: regular file, blocks %d\n", inode->blocks);
@@ -1313,7 +1331,7 @@ static int create_inode(char *pathname, struct inode *i)
 						strerror(errno));
 					goto failed;
 				}
-				res = set_attributes(pathname, i->mode, i->uid,
+				res = set_attributes(pathname, process_file_mode(i->mode), i->uid,
 					i->gid, i->time, i->xattr, TRUE);
 				if(res == FALSE)
 					goto failed;
@@ -1342,7 +1360,7 @@ static int create_inode(char *pathname, struct inode *i)
 					strerror(errno));
 				goto failed;
 			}
-			res = set_attributes(pathname, i->mode, i->uid, i->gid,
+			res = set_attributes(pathname, process_file_mode(i->mode), i->uid, i->gid,
 				i->time, i->xattr, TRUE);
 			if(res == FALSE)
 				goto failed;
@@ -1363,7 +1381,7 @@ static int create_inode(char *pathname, struct inode *i)
 					strerror(errno));
 				goto failed;
 			}
-			res = set_attributes(pathname, i->mode, i->uid, i->gid,
+			res = set_attributes(pathname, process_file_mode(i->mode), i->uid, i->gid,
 				i->time, i->xattr, TRUE);
 			if(res == FALSE)
 				goto failed;
@@ -2881,7 +2899,7 @@ static int dir_scan(char *parent_name, unsigned int start_block, unsigned int of
 	int depth)
 {
 	unsigned int type;
-	int scan_res = TRUE;
+	int scan_res = TRUE, update = TRUE;
 	char *name;
 	struct pathname *newt, *newc;
 	struct pathnames *new_sticky = NULL;
@@ -2938,17 +2956,47 @@ static int dir_scan(char *parent_name, unsigned int start_block, unsigned int of
 
 			if(S_ISDIR(buf.st_mode)) {
 				/*
-				 * Try to change permissions of existing directory so
-				 * that we can write to it
+				 * We have an existing directory.  Check the ownership because
+				 * what to do next depends on whether we own it.
 				 */
-				res = chmod(parent_name, S_IRUSR|S_IWUSR|S_IXUSR);
-				if (res == -1) {
-					EXIT_UNSQUASH_IGNORE("dir_scan: failed to "
-						"change permissions for directory %s,"
-						" because %s\n", parent_name,
-						strerror(errno));
-					squashfs_closedir(dir);
-					return FALSE;
+				if(buf.st_uid == getuid()) {
+					/*
+					 * This directory is owned by us, which  means we can
+					 * change the permissions if necessary
+					 */
+					res = access(parent_name, F_OK|R_OK|W_OK|X_OK);
+					if(res == -1) {
+						/* Have not got permissions, so try to change them.  */
+						res = chmod(parent_name, S_IRUSR|S_IWUSR|S_IXUSR);
+						if (res == -1) {
+							EXIT_UNSQUASH_IGNORE("dir_scan: failed to "
+								"change permissions for directory %s,"
+								" because %s\n", parent_name,
+								strerror(errno));
+							squashfs_closedir(dir);
+							return FALSE;
+						}
+					}
+				} else {
+					/*
+					 * Don't own this directory, and so can't change the
+					 * permissions, but we may have the necessary permission
+					 */
+					res = access(parent_name, F_OK|R_OK|W_OK|X_OK);
+					if(res == -1) {
+						EXIT_UNSQUASH_IGNORE("dir_scan: don't have "
+							"permissions for directory %s,"
+							" because %s\n", parent_name,
+							strerror(errno));
+						squashfs_closedir(dir);
+						return FALSE;
+					}
+
+					/*
+					 * don't try to update the directory using set_attributes later
+					 * because we don't own it
+					 */
+					update = FALSE;
 				}
 				break;
 			} else {
@@ -3016,7 +3064,7 @@ static int dir_scan(char *parent_name, unsigned int start_block, unsigned int of
 		}
 	}
 
-	if(!lsonly)
+	if(!lsonly && update)
 		queue_dir(parent_name, dir);
 
 	squashfs_closedir(dir);
@@ -3252,7 +3300,7 @@ static void *writer(void *arg)
 			continue;
 		} else if(file->fd == -1) {
 			/* write attributes for directory file->pathname */
-			res = set_attributes(file->pathname, file->mode,
+			res = set_attributes(file->pathname, process_dir_mode(file->mode),
 				file->uid, file->gid, file->time, file->xattr,
 				TRUE);
 			if(res == FALSE)
@@ -3333,11 +3381,12 @@ static void *writer(void *arg)
 
 		close_wake(file_fd);
 		if(local_fail == FALSE) {
-			int set = !root_process && !(file->mode & S_IWUSR) && has_xattrs(file->xattr);
+			int mode = process_file_mode(file->mode);
+			int set = !root_process && !(mode & S_IWUSR) && has_xattrs(file->xattr);
 
-			res = set_attributes(file->pathname, file->mode,
+			res = set_attributes(file->pathname, mode,
 				file->uid, file->gid, file->time, file->xattr,
-				force || set);
+				set);
 			if(res == FALSE)
 				exit_code = TRUE;
 		} else
@@ -4884,6 +4933,22 @@ static int parse_options(int argc, char *argv[])
 					unsquashfs_option_help("-force-gid", "unsquashfs: -force-gid invalid gid or unknown group name\n");
 			}
 			global_gid_opt = TRUE;
+		} else if(strcmp(argv[i], "-force-file-mode") == 0) {
+			char *error;
+
+			if(++i == argc)
+				unsquashfs_option_help("-force-file-mode", "unsquashfs: -force-file-mode missing mode, symbolic mode or octal number expected\n");
+			else if(!parse_mode(argv[i], &global_file_mode, &error))
+				unsquashfs_option_help("-force-file-mode", "%sunsquashfs: -force-file-mode invalid mode, symbolic mode or octal number expected\n", error);
+			global_file_mode_opt = TRUE;
+		} else if(strcmp(argv[i], "-force-dir-mode") == 0) {
+			char *error;
+
+			if(++i == argc)
+				unsquashfs_option_help("-force-dir-mode", "unsquashfs: -force-dir-mode missing mode, symbolic mode or octal number expected\n");
+			else if(!parse_mode(argv[i], &global_dir_mode, &error))
+				unsquashfs_option_help("-force-dir-mode", "%sunsquashfs: -force-dir-mode invalid mode, symbolic mode or octal number expected\n", error);
+			global_dir_mode_opt = TRUE;
 		} else if(strcmp(argv[i], "-cat") == 0)
 			cat_files = TRUE;
 		else if(strcmp(argv[i], "-excludes") == 0)
