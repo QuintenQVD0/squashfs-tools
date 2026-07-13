@@ -550,17 +550,49 @@ static inline void put_write_buffer_hash(struct file_buffer *buffer)
 }
 
 
-static inline void put_write_buffer(struct file_buffer *buffer)
+/* Truncate file to length.  Some filesystems do not implement
+ * ftruncate() and fail with EOPNOTSUPP/ENOTSUP, treat that as
+ * non-fatal. */
+static void truncate_file(int fd, long long length, char *filename)
 {
-	buffer->block = get_and_inc_vpos(buffer->size);
-	buffer->sequence = get_sequence();
-	order_queue_put(to_order, buffer);
+	if(ftruncate(fd, length) != 0) {
+		if(errno == EOPNOTSUPP || errno == ENOTSUP)
+			ERROR("Warning: could not truncate %s because "
+				"%s. Leaving trailing bytes in place\n",
+				filename, strerror(errno));
+		else
+			BAD_ERROR("Failed to truncate %s because %s\n",
+				filename, strerror(errno));
+	}
 }
 
 
+/* If necessary:
+ *    truncate output destination to filesystem end
+ *    pad to 4Kbyte multiple */
+static void prep_destination()
+{
+	long long end = start_offset + get_dpos();
+	int tail = end & (4096 - 1);
+
+	if(!block_device && !streaming) {
+		long long file_end = lseek(fd, 0, SEEK_END);
+
+		if(file_end == -1)
+			BAD_ERROR("Failed to lseek to end of output filesystem\n");
+		else if(file_end > end)
+			truncate_file(fd, end, "output filesystem");
+	}
+
+	if(!nopad && tail) {
+		char temp[4096] = {0};
+		write_destination(fd, get_dpos(), 4096 - tail, temp);
+	}
+}
+
 void restorefs()
 {
-	int i, res;
+	int res;
 
 	ERROR("Exiting - restoring original filesystem!\n\n");
 
@@ -589,19 +621,7 @@ void restorefs()
 	id_count = sid_count;
 	restore_xattrs();
 	write_filesystem_tables(&sBlk);
-
-	if(!block_device) {
-		int res = ftruncate(fd, get_dpos());
-		if(res != 0)
-			BAD_ERROR("Failed to truncate dest file because %s\n",
-				strerror(errno));
-	}
-
-	if(!nopad && (i = get_dpos() & (4096 - 1))) {
-		char temp[4096] = {0};
-		write_destination(fd, get_dpos(), 4096 - i, temp);
-	}
-
+	prep_destination();
 	write_superblock(&sBlk);
 
 	res = close(fd);
@@ -6030,7 +6050,7 @@ static void process_exclude_file(char *argv, int follow)
 			continue;
 
 		if(old_exclude)
-			old_add_exclude(filename, FALSE);
+			old_add_exclude(filename, follow);
 		else
 			add_exclude(filename);
 	}
@@ -6749,9 +6769,7 @@ static void fix_file(char *filename)
 	if(res == -1)
 		BAD_ERROR("Failed to write file \"%s\"\n", filename);
 
-	res = ftruncate(fd, offset);
-	if(res == -1)
-		BAD_ERROR("Failed to truncate file \"%s\" because %s\n", filename, strerror(errno));
+	truncate_file(fd, offset, filename);
 }
 
 
@@ -7702,18 +7720,7 @@ static int sqfstar(int argc, char *argv[])
 
 	progressbar_finish();
 
-	if(!block_device && !streaming) {
-		res = ftruncate(fd, start_offset + get_dpos());
-		if(res != 0)
-			BAD_ERROR("Failed to truncate dest file because %s\n",
-				strerror(errno));
-	}
-
-	if(!nopad && (i = get_dpos() & (4096 - 1))) {
-		char temp[4096] = {0};
-		write_destination(fd, get_dpos(), 4096 - i, temp);
-	}
-
+	prep_destination();
 	write_superblock(&sBlk);
 
 	res = close(fd);
@@ -9194,18 +9201,7 @@ int main(int argc, char *argv[])
 
 	progressbar_finish();
 
-	if(!block_device && !streaming) {
-		res = ftruncate(fd, start_offset + get_dpos());
-		if(res != 0)
-			BAD_ERROR("Failed to truncate dest file because %s\n",
-				strerror(errno));
-	}
-
-	if(!nopad && (i = get_dpos() & (4096 - 1))) {
-		char temp[4096] = {0};
-		write_destination(fd, get_dpos(), 4096 - i, temp);
-	}
-
+	prep_destination();
 	write_superblock(&sBlk);
 
 	res = close(fd);
