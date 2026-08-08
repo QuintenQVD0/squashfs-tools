@@ -1,10 +1,10 @@
-#ifndef RESTORE_H
-#define RESTORE_H
+#ifndef FD_POS_H
+#define FD_POS_H
 /*
  * Create a squashfs filesystem.  This is a highly compressed read only
  * filesystem.
  *
- * Copyright (c) 2013, 2014, 2026
+ * Copyright (c) 2026
  * Phillip Lougher <phillip@squashfs.org.uk>
  *
  * This program is free software; you can redistribute it and/or
@@ -21,33 +21,43 @@
  * along with this program; if not, write to the Free Software
  * Foundation, 59 Temple Place - Suite 330, Boston, MA 02111-1307, USA.
  *
- * restore.h
+ * fd_pos.h
  */
 
-extern pthread_t *init_restore_thread();
+#ifdef TEST_STREAM_SEEK
+static long long fd_pos = 0;
 
-#ifndef __ANDROID__
-static inline int kill_orderer()
+static pthread_mutex_t mutex;
+
+static inline void check_fd_pos(long long offset)
 {
-	return 0;
+	pthread_cleanup_push((void *) pthread_mutex_unlock, &mutex);
+	pthread_mutex_lock(&mutex);
+
+	if(fd_pos != offset)
+		ERROR("BUG: trying to seek on stdout when streaming!\n");
+
+	pthread_cleanup_pop(1);
 }
 
-static inline int kill_writer()
+
+static inline void update_fd_pos(long long offset)
 {
-	return 0;
+	pthread_cleanup_push((void *) pthread_mutex_unlock, &mutex);
+	pthread_mutex_lock(&mutex);
+
+	fd_pos = offset;
+
+	pthread_cleanup_pop(1);
 }
 #else
-extern int orderer_die;
-extern int writer_die;
-
-static inline int kill_orderer()
+static inline void check_fd_pos(long long offset)
 {
-	return __atomic_exchange_n(&orderer_die, FALSE, __ATOMIC_SEQ_CST);
 }
 
-static inline int kill_writer()
+
+static inline void update_fd_pos(long long offset)
 {
-	return __atomic_exchange_n(&writer_die, FALSE, __ATOMIC_SEQ_CST);
 }
 #endif
 #endif

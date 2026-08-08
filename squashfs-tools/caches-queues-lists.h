@@ -4,7 +4,7 @@
  * Create a squashfs filesystem.  This is a highly compressed read only
  * filesystem.
  *
- * Copyright (c) 2013, 2014, 2019, 2021, 2024, 2025
+ * Copyright (c) 2013, 2014, 2019, 2021, 2024, 2025, 2026
  * Phillip Lougher <phillip@squashfs.org.uk>
  *
  * This program is free software; you can redistribute it and/or
@@ -90,7 +90,7 @@ void remove_##NAME##_hash_table(TYPE *container, struct file_buffer *entry, int 
 
 #define QUEUE_CACHE	1
 #define GEN_CACHE	2
-#define WSYNC_CMD	3
+#define WKILL_CMD	3
 #define RESET_CMD	4
 #define MAP_CMD		5
 
@@ -163,6 +163,7 @@ struct queue {
  */
 struct seq_queue {
 	unsigned short		version;
+	short			die;
 	int			fragment_count;
 	int			block_count;
 	long long		sequence;
@@ -255,6 +256,7 @@ extern struct seq_queue *seq_queue_init();
 extern void dump_seq_queue(struct seq_queue *, int);
 extern void seq_queue_flush(struct seq_queue *);
 extern void main_queue_put(struct seq_queue *, struct file_buffer *);
+extern void order_queue_die(struct seq_queue *);
 extern void order_queue_put(struct seq_queue *, struct file_buffer *);
 extern struct file_buffer *main_queue_get(struct seq_queue *);
 extern struct file_buffer *order_queue_get(struct seq_queue *);

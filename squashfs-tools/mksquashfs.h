@@ -55,10 +55,8 @@ struct inode_info {
 	struct stat		buf;
 	struct inode_info	*next;
 	struct pseudo_dev	*pseudo;
-	union {
-		struct tar_file		*tar_file;
-		struct file_info	*file;
-	};
+	struct tar_file		*tar_file;
+	struct file_info	*file;
 	struct pseudo_xattr	*xattr;
 	union {
 		char			*symlink;
@@ -74,7 +72,7 @@ struct inode_info {
 	char			always_use_fragments;
 	char			noD;
 	char			noF;
-	char			tarfile;
+	char			archive;
 	char			read;
 	char			scanned;
 	char			alignment;
@@ -241,8 +239,7 @@ static inline int get_pathmax()
 extern struct cache *fragment_buffer, *reserve_cache;
 extern struct cache *fwriter_buffer;
 extern struct queue_cache *bwriter_buffer;
-extern struct queue *to_reader, *to_writer, *from_writer, *to_frag,
-       *locked_fragment;
+extern struct queue *to_reader, *to_writer, *to_frag, *locked_fragment;
 extern struct queue_cache *to_deflate;
 extern struct read_queue *to_process_frag;
 extern struct append_file **file_mapping;
@@ -264,6 +261,7 @@ extern int no_hardlinks;
 extern struct dir_info *root_dir;
 extern struct pathnames *paths;
 extern int tarfile;
+extern int zipfile;
 extern int root_mode_opt;
 extern struct mode_data *root_mode;
 extern int root_time_opt;
@@ -281,6 +279,7 @@ extern int global_gid_opt;
 extern unsigned int global_gid;
 extern int global_dir_mode_opt;
 extern struct mode_data *global_dir_mode;
+extern int fd;
 
 extern int read_fs_bytes(int, long long, long long, void *);
 extern void add_file(long long, long long, long long, unsigned int *, int,

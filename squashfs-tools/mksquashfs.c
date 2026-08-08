@@ -79,10 +79,13 @@
 #include "symbolic_mode.h"
 #include "thread.h"
 #include "reader.h"
+#include "zipfile.h"
 #include "limit.h"
 #include "alloc.h"
 #include "virt_disk_pos.h"
 #include "uid_gid.h"
+#include "fd_pos.h"
+#include "archive.h"
 
 /* Compression options */
 int noF = FALSE;
@@ -168,6 +171,9 @@ dev_t cur_dev;
 
 /* Is Mksquashfs processing a tarfile? */
 int tarfile = FALSE;
+
+/* Is Mksquashfs processing zip file(s)? */
+int zipfile = FALSE;
 
 /* Is Mksquashfs reading a pseudo file from stdin? */
 int pseudo_stdin = FALSE;
@@ -295,7 +301,7 @@ unsigned int sid_count = 0, suid_count = 0, sguid_count = 0;
 struct cache *fragment_buffer, *reserve_cache;
 struct cache *fwriter_buffer;
 struct queue_cache *bwriter_buffer;
-struct queue *to_reader, *to_writer, *from_writer, *to_frag, *from_order;
+struct queue *to_reader, *to_writer, *to_frag, *from_order;
 struct queue_cache *to_deflate;
 struct read_queue *to_process_frag;
 struct seq_queue *to_main;
@@ -305,7 +311,6 @@ pthread_t reader_thread1, writer_thread, main_thread;
 pthread_t *deflator_thread, *frag_deflator_thread, *frag_thread;
 pthread_t *restore_thread = NULL;
 pthread_mutex_t	fragment_mutex = PTHREAD_MUTEX_INITIALIZER;
-pthread_mutex_t	lseek_mutex = PTHREAD_MUTEX_INITIALIZER;
 pthread_mutex_t	dup_mutex = PTHREAD_MUTEX_INITIALIZER;
 pthread_mutex_t	pos_mutex = PTHREAD_MUTEX_INITIALIZER;
 
@@ -332,9 +337,6 @@ int logging=FALSE;
 
 /* file descriptor of the output filesystem */
 int fd;
-
-/* Current file position in output filesystem */
-off_t fd_pos = 0;
 
 /* Variables used for appending */
 int appending = TRUE;
@@ -512,17 +514,16 @@ static inline void send_orderer_reset(long long vpos)
 }
 
 
-static inline void  sync_writer_thread()
+static inline void kill_writer_thread()
 {
 	struct file_buffer *buffer = MALLOC(sizeof(struct file_buffer));
 
 	buffer->cache = NULL;
 	buffer->sequence = get_sequence();
-	buffer->buffer_type = WSYNC_CMD;
+	buffer->buffer_type = WKILL_CMD;
 
 	order_queue_put(to_order, buffer);
-	if(queue_get(from_writer) != 0)
-		BAD_ERROR("Got unexpected response in sync_writer_thread\n");
+	pthread_join(writer_thread, NULL);
 }
 
 
@@ -751,38 +752,34 @@ bytes_read:
 int read_fs_bytes(int fd, long long byte, long long bytes, void *buff)
 {
 	off_t off = byte + start_offset;
-	int res = 1;
+	long long res, count;
 
 	TRACE("read_fs_bytes: reading from position 0x%llx, bytes %lld\n",
 		byte, bytes);
 
-	pthread_cleanup_push((void *) pthread_mutex_unlock, &lseek_mutex);
-	pthread_mutex_lock(&lseek_mutex);
+	for(count = 0; count < bytes; count += res, off += res) {
+		int len = (bytes - count) > MAXIMUM_READ_SIZE ?
+					MAXIMUM_READ_SIZE : bytes - count;
 
-	if(fd_pos != off) {
-		if(lseek(fd, off, SEEK_SET) == -1) {
-			ERROR("read_fs_bytes: Lseek on destination failed "
-				"because %s, offset=0x%llx\n", strerror(errno),
-				(long long) off);
-			fd_pos = LLONG_MAX;
-			res = FALSE;
-			goto unlock;
+		res = pread(fd, buff + count, len, off);
+		if(res < 1) {
+			if(res == 0)
+				break;
+			else if(errno != EINTR) {
+				ERROR("Read on destination failed because %s\n",
+						strerror(errno));
+				return FALSE;
+			} else
+				res = 0;
 		}
 	}
 
-	if(read_bytes(fd, buff, bytes) < bytes) {
+	if(count < bytes) {
 		ERROR("Read on destination failed\n");
-		fd_pos = LLONG_MAX;
-		res = FALSE;
-		goto unlock;
+		return FALSE;
 	}
 
-	fd_pos = off + bytes;
-
-unlock:
-	pthread_cleanup_pop(1);
-
-	return res;
+	return TRUE;
 }
 
 
@@ -812,38 +809,31 @@ static int write_bytes(int fd, void *buff, long long bytes)
 void write_destination(int fd, long long byte, long long bytes, void *buff)
 {
 	off_t off = start_offset + byte;
+	long long res, count;
 
-	pthread_cleanup_push((void *) pthread_mutex_unlock, &lseek_mutex);
-	pthread_mutex_lock(&lseek_mutex);
+	if(streaming) {
+		check_fd_pos(off);
+		update_fd_pos(off + bytes);
+	}
 
-	if(fd_pos != off) {
-		if(streaming)
-			/*
-			 * We cannot seek on the output filesystem, and this
-			 * situation is a bug - with no duplicate checking,
-			 * no seeking on the output filesystem should be
-			 * necessary.
-			 */
-			BAD_ERROR("BUG: trying to seek on stdout when streaming!\n");
+	for(count = 0; count < bytes; count += res, off += res) {
+		int len = (bytes - count) > MAXIMUM_READ_SIZE ?
+					MAXIMUM_READ_SIZE : bytes - count;
 
-		if(lseek(fd, off, SEEK_SET) == -1) {
-			ERROR("write_destination: Lseek on destination failed "
-				"because %s, offset=0x%llx\n", strerror(errno),
-				(long long) off);
-			BAD_ERROR("Probably out of space on output %s\n",
-				block_device ? "block device" : "filesystem");
+		res = streaming ? write(fd, buff + count, len) :
+				pwrite(fd, buff + count, len, off);
+		if(res == -1) {
+			if(errno != EINTR) {
+				ERROR("Write failed because %s\n",
+						strerror(errno));
+				ERROR("Failed to write to output %s\n",
+					block_device ? "block device" : "filesystem");
+				BAD_ERROR("Probably out of space on output %s\n",
+					block_device ? "block device" : "filesystem");
+			}
+			res = 0;
 		}
 	}
-
-	if(write_bytes(fd, buff, bytes) == -1) {
-		ERROR("Failed to write to output %s\n",
-			block_device ? "block device" : "filesystem");
-		BAD_ERROR("Probably out of space on output %s\n",
-			block_device ? "block device" : "filesystem");
-	}
-
-	fd_pos = off + bytes;
-	pthread_cleanup_pop(1);
 }
 
 
@@ -1631,6 +1621,11 @@ again:
 		if(locked)
 			/* got a buffer being filled in.  Wait for it */
 			cache_wait_unlock(buffer);
+		if(buffer->error) {
+			ERROR("Failed to read fragment from output"
+				" filesystem\n");
+			BAD_ERROR("Output filesystem corrupted?\n");
+		}
 		goto finished;
 	}
 
@@ -1641,6 +1636,11 @@ again:
 		if(locked)
 			/* got a buffer being filled in.  Wait for it */
 			cache_wait_unlock(buffer);
+		if(buffer->error) {
+			ERROR("Failed to read fragment from output"
+				" filesystem\n");
+			BAD_ERROR("Output filesystem corrupted?\n");
+		}
 		goto finished;
 	}
 
@@ -2684,39 +2684,38 @@ static void *writer(void *arg)
 {
 	while(1) {
 		struct file_buffer *file_buffer = queue_get(to_writer);
+		long long res, count, bytes;
 		off_t off;
 
-		if(file_buffer == NULL) {
-			queue_put(from_writer, NULL);
-			continue;
-		}
+		if(kill_writer() || file_buffer == NULL)
+			pthread_exit(NULL);
 
 		off = start_offset + file_buffer->block;
+		bytes = file_buffer->size;
 
-		pthread_cleanup_push((void *) pthread_mutex_unlock, &lseek_mutex);
-		pthread_mutex_lock(&lseek_mutex);
+		if(streaming) {
+			check_fd_pos(off);
+			update_fd_pos(off + bytes);
+		}
 
-		if(fd_pos != off) {
-			if(lseek(fd, off, SEEK_SET) == -1) {
-				ERROR("writer: Lseek on destination failed "
-					"because %s, offset=0x%llx\n",
-					strerror(errno), (long long) off);
-				BAD_ERROR("Probably out of space on output "
-					"%s\n", block_device ? "block device" :
-					"filesystem");
+		for(count = 0; count < bytes; count += res, off += res) {
+			int len = (bytes - count) > MAXIMUM_READ_SIZE ?
+						MAXIMUM_READ_SIZE : bytes - count;
+
+			res = streaming ? write(fd, file_buffer->data + count, len) :
+						pwrite(fd, file_buffer->data + count, len, off);
+			if(res == -1) {
+				if(errno != EINTR) {
+					ERROR("Write failed because %s\n",
+							strerror(errno));
+					ERROR("Failed to write to output %s\n",
+						block_device ? "block device" : "filesystem");
+					BAD_ERROR("Probably out of space on output %s\n",
+						block_device ? "block device" : "filesystem");
+				}
+				res = 0;
 			}
-
 		}
-
-		if(write_bytes(fd, file_buffer->data, file_buffer->size) == -1) {
-			ERROR("Failed to write to output %s\n",
-				block_device ? "block device" : "filesystem");
-			BAD_ERROR("Probably out of space on output %s\n",
-				block_device ? "block device" : "filesystem");
-		}
-
-		fd_pos = off + file_buffer->size;
-		pthread_cleanup_pop(1);
 
 		gen_cache_block_put(file_buffer);
 	}
@@ -2822,9 +2821,13 @@ static void *orderer(void *arg)
 
 	while(1) {
 		struct file_buffer *write_buffer = order_queue_get(to_order);
-		long long block = write_buffer->block;
+
+		if(kill_orderer() || write_buffer == NULL)
+			pthread_exit(NULL);
 
 		if(write_buffer->buffer_type == GEN_CACHE) {
+			long long block = write_buffer->block;
+
 			pthread_mutex_lock(&fragment_mutex);
 			write_buffer->block = get_and_inc_dpos(SQUASHFS_COMPRESSED_SIZE_BLOCK(write_buffer->size));
 			fragment_table[block].start_block = write_buffer->block;
@@ -2833,17 +2836,19 @@ static void *orderer(void *arg)
 			log_fragment(block, write_buffer->block);
 			queue_put(to_writer, write_buffer);
 		} else if(write_buffer->buffer_type == QUEUE_CACHE) {
+			long long block = write_buffer->block;
+
 			write_buffer->block = get_and_inc_dpos_aligned(write_buffer);
 			add_virt_disk(block, write_buffer->block);
 			queue_put(to_writer, write_buffer);
-		} else if(write_buffer->buffer_type == WSYNC_CMD) {
+		} else if(write_buffer->buffer_type == WKILL_CMD) {
 			free(write_buffer);
 			queue_put(to_writer, NULL);
 		} else if(write_buffer->buffer_type == RESET_CMD) {
 			set_dpos(get_virt_disk(write_buffer->block));
 			free(write_buffer);
 		} else if(write_buffer->buffer_type == MAP_CMD) {
-			add_virt_disk(block, get_dpos());
+			add_virt_disk(write_buffer->block, get_dpos());
 			free(write_buffer);
 		} else
 
@@ -3449,7 +3454,7 @@ static struct inode_info *lookup_inode4(struct stat *buf, struct pseudo_dev *pse
 	inode->inode_number = 0;
 	inode->dummy_root_dir = FALSE;
 	inode->xattr = NULL;
-	inode->tarfile = FALSE;
+	inode->archive = FALSE;
 	inode->alignment = 0;
 	inode->deref = FALSE;
 
@@ -4856,7 +4861,7 @@ static void dir_scan8(squashfs_inode *inode, struct dir_info *dir_info)
 		if(dir_ent->inode->inode == SQUASHFS_INVALID_BLK) {
 			switch(buf->st_mode & S_IFMT) {
 				case S_IFREG:
-					if(dir_ent->inode->tarfile)
+					if(tar_archive(dir_ent->inode->archive))
 						file = dir_ent->inode->tar_file->file;
 					else
 						file = dir_ent->inode->file;
@@ -5699,13 +5704,12 @@ static void initialise_threads(int readq, int fragq, int bwriteq, int fwriteq,
 	 * allowing the user to press ^C twice to restore the existing
 	 * filesystem.
 	 *
-	 * SIGUSR1 is an internal signal, which is used by the sub-threads
-	 * to tell the main thread to terminate, deleting the destination file,
-	 * or if necessary restoring the filesystem on appending
+	 * SIGUSR1 and SIGUSR2 are internal signals.
 	 */
 	signal(SIGTERM, sighandler);
 	signal(SIGINT, sighandler);
 	signal(SIGUSR1, sighandler);
+	signal(SIGUSR2, sighandler);
 
 	/* block SIGQUIT and SIGHUP, these are handled by the info thread */
 	sigemptyset(&sigmask);
@@ -5722,6 +5726,7 @@ static void initialise_threads(int readq, int fragq, int bwriteq, int fwriteq,
 	sigaddset(&sigmask, SIGINT);
 	sigaddset(&sigmask, SIGTERM);
 	sigaddset(&sigmask, SIGUSR1);
+	sigaddset(&sigmask, SIGUSR2);
 	if(pthread_sigmask(SIG_BLOCK, &sigmask, &old_mask) != 0)
 		BAD_ERROR("Failed to set signal mask in initialise_threads\n");
 
@@ -5737,7 +5742,6 @@ static void initialise_threads(int readq, int fragq, int bwriteq, int fwriteq,
 	bwriter_buffer = to_deflate = queue_cache_init(&thread_mutex, block_size, freelst);
 	to_process_frag = read_queue_init();
 	to_writer = queue_init(bwriter_size + fwriter_size, NULL);
-	from_writer = queue_init(1, NULL);
 	from_order = queue_init(1, NULL);
 	to_frag = queue_init(fragment_size, &thread_mutex);
 	to_main = seq_queue_init();
@@ -5812,7 +5816,7 @@ skip_inode_hash_table:
 }
 
 
-static char *get_component(char *target, char **targname)
+static char *get_comp(char *target, char **targname)
 {
 	char *start;
 
@@ -5855,7 +5859,7 @@ static struct pathname *add_path(struct pathname *paths, char *target, char *all
 	char *targname;
 	int i, error;
 
-	target = get_component(target, &targname);
+	target = get_comp(target, &targname);
 
 	if(paths == NULL) {
 		paths = MALLOC(sizeof(struct pathname));
@@ -7710,8 +7714,7 @@ static int sqfstar(int argc, char *argv[])
 	while((fragment = get_frag_action(fragment)))
 		write_fragment(*fragment);
 
-	sync_writer_thread();
-	pthread_cancel(writer_thread);
+	kill_writer_thread();
 
 	if(!check_id_table_offset())
 		BAD_ERROR("id entry out of range after applying -uid-gid-offset offset\n");
@@ -8530,6 +8533,8 @@ int main(int argc, char *argv[])
 				strcmp(argv[i], "-cpiostyle0") == 0 ||
 				strcmp(argv[i], "-tar") == 0) {
 			/* parsed previously */
+		} else if(strcmp(argv[i], "-zip") == 0) {
+			zipfile = TRUE;
 		} else if(strcmp(argv[i], "-comp") == 0) {
 			/* parsed previously */
 			i++;
@@ -8686,6 +8691,20 @@ int main(int argc, char *argv[])
 		BAD_ERROR("Sources on the command line should be - when using "
 			"-tar option, i.e. mksquashfs - image.sqfs -tar\n");
 
+	/* The -zip option reads seekable archives named on the command line,
+	 * so it is incompatible with the stdin-reading input options and needs
+	 * at least one source archive */
+	if(zipfile && (tarfile || cpiostyle || pseudo_stdin))
+		BAD_ERROR("-zip cannot be combined with -tar, -cpiostyle[0] or "
+			"a pseudo file read from stdin\n");
+
+	if(zipfile && !source)
+		BAD_ERROR("No zip files specified on the command line, i.e. "
+			"mksquashfs file1.zip file2.zip image.sqfs -zip\n");
+
+	if(zipfile && any_actions())
+		BAD_ERROR("Actions are unsupported when reading zip files\n");
+
 	/* If -tar option is set, then check that actions have not been
 	 * specified, which are unsupported with tar file reading
 	 */
@@ -8701,6 +8720,12 @@ int main(int argc, char *argv[])
 	 * cannot be used with tar files */
 	if(tarfile && exclude_option && old_exclude)
 		BAD_ERROR("-wildcards must be specified with tar files and -ef/-e\n");
+
+	/* If -zip option is set and there are exclude files (either -ef or -e),
+	 * then -wildcards or -regex must be set too.  The older legacy exclude
+	 * code cannot be used with zip files */
+	if(zipfile && exclude_option && old_exclude)
+		BAD_ERROR("-wildcards must be specified with zip files and -ef/-e\n");
 
 	/*
 	 * The -noI option implies -noId for backwards compatibility, so reset
@@ -9162,6 +9187,8 @@ int main(int argc, char *argv[])
 
 		if(tarfile)
 			inode = process_tar_file(progress);
+		else if(zipfile)
+			inode = process_zip_file(progress);
 		else if(tarstyle || cpiostyle)
 			inode = process_source(progress, deref, deref_keep);
 		else if(!source)
@@ -9191,8 +9218,7 @@ int main(int argc, char *argv[])
 	while((fragment = get_frag_action(fragment)))
 		write_fragment(*fragment);
 
-	sync_writer_thread();
-	pthread_cancel(writer_thread);
+	kill_writer_thread();
 
 	if(!check_id_table_offset())
 		BAD_ERROR("id entry out of range after applying -uid-gid-offset offset\n");

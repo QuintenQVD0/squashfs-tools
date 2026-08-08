@@ -461,7 +461,7 @@ static struct cache_entry *cache_get(struct cache *cache, long long block, int s
 }
 
 	
-static void cache_block_ready(struct cache_entry *entry, int error)
+static void cache_block_ready(struct cache_entry *entry, int error, int uncomp_size)
 {
 	/*
 	 * mark cache entry as being complete, reading and (if necessary)
@@ -472,6 +472,7 @@ static void cache_block_ready(struct cache_entry *entry, int error)
 	pthread_mutex_lock(&entry->cache->mutex);
 	entry->pending = FALSE;
 	entry->error = error;
+	entry->uncomp_size = uncomp_size;
 
 	/*
 	 * if the wait_pending flag is set, one or more threads may be waiting
@@ -1096,6 +1097,7 @@ static int write_file(struct inode *inode, char *pathname)
 	long long start = inode->start;
 	mode_t mode = process_file_mode(inode->mode);
 	struct stat buf;
+	struct file_entry *block;
 
 	TRACE("write_file: regular file, blocks %d\n", inode->blocks);
 
@@ -1133,8 +1135,13 @@ static int write_file(struct inode *inode, char *pathname)
 
 	for(i = 0; i < inode->blocks; i++) {
 		int c_byte = SQUASHFS_COMPRESSED_SIZE_BLOCK(block_list[i]);
-		struct file_entry *block = MALLOC(sizeof(struct file_entry));
 
+		if(c_byte < 0 || c_byte > block_size)
+			EXIT_UNSQUASH("File system corrupted - block size "
+				"%d in block list negative or too large "
+				"(%s)\n", c_byte, pathname);
+
+		block = MALLOC(sizeof(struct file_entry));
 		block->offset = 0;
 		block->size = i == file_end ? inode->data & (block_size - 1) :
 			block_size;
@@ -1149,12 +1156,25 @@ static int write_file(struct inode *inode, char *pathname)
 	}
 
 	if(inode->frag_bytes) {
-		int size;
+		int size, c_byte;
 		long long start;
-		struct file_entry *block = MALLOC(sizeof(struct file_entry));
 
 		s_ops->read_fragment(inode->fragment, &start, &size);
+		c_byte = SQUASHFS_COMPRESSED_SIZE_BLOCK(size);
+
+		if(c_byte < 0 || c_byte > block_size)
+			EXIT_UNSQUASH("File system corrupted - fragment size "
+				"%d in fragment table negative or too large "
+				"(%s)\n", c_byte, pathname);
+
+		block = MALLOC(sizeof(struct file_entry));
 		block->buffer = cache_get(fragment_cache, start, size);
+
+		if(inode->offset < 0 || inode->offset >= block_size)
+			EXIT_UNSQUASH("File system corrupted - fragment offset "
+				"%d in inode negative or too large (%s)\n",
+				inode->offset, pathname);
+
 		block->offset = inode->offset;
 		block->size = inode->frag_bytes;
 		queue_put(to_writer, block);
@@ -1171,6 +1191,7 @@ static int cat_file(struct inode *inode, char *pathname)
 	unsigned int *block_list = NULL;
 	int file_end = inode->data / block_size;
 	long long start = inode->start;
+	struct file_entry *block;
 
 	TRACE("cat_file: regular file, blocks %d\n", inode->blocks);
 
@@ -1189,8 +1210,13 @@ static int cat_file(struct inode *inode, char *pathname)
 
 	for(i = 0; i < inode->blocks; i++) {
 		int c_byte = SQUASHFS_COMPRESSED_SIZE_BLOCK(block_list[i]);
-		struct file_entry *block = MALLOC(sizeof(struct file_entry));
 
+		if(c_byte < 0 || c_byte > block_size)
+			EXIT_UNSQUASH("File system corrupted - block size "
+				"%d in block list negative or too large "
+				"(%s)\n", c_byte, pathname);
+
+		block = MALLOC(sizeof(struct file_entry));
 		block->offset = 0;
 		block->size = i == file_end ? inode->data & (block_size - 1) :
 			block_size;
@@ -1205,12 +1231,25 @@ static int cat_file(struct inode *inode, char *pathname)
 	}
 
 	if(inode->frag_bytes) {
-		int size;
+		int size, c_byte;
 		long long start;
-		struct file_entry *block = MALLOC(sizeof(struct file_entry));
 
 		s_ops->read_fragment(inode->fragment, &start, &size);
+		c_byte = SQUASHFS_COMPRESSED_SIZE_BLOCK(size);
+
+		if(c_byte < 0 || c_byte > block_size)
+			EXIT_UNSQUASH("File system corrupted - fragment size "
+				"%d in fragment table negative or too large "
+				"(%s)\n", c_byte, pathname);
+
+		block = MALLOC(sizeof(struct file_entry));
 		block->buffer = cache_get(fragment_cache, start, size);
+
+		if(inode->offset < 0 || inode->offset >= block_size)
+			EXIT_UNSQUASH("File system corrupted - fragment offset "
+				"%d in inode negative or too large (%s)\n",
+				inode->offset, pathname);
+
 		block->offset = inode->offset;
 		block->size = inode->frag_bytes;
 		queue_put(to_writer, block);
@@ -3267,7 +3306,7 @@ static void *reader(void *arg)
 			 * flag, set error appropriately, and wake up any
 			 * threads waiting on this buffer
 			 */
-			cache_block_ready(entry, !res);
+			cache_block_ready(entry, !res, SQUASHFS_COMPRESSED_SIZE_BLOCK(entry->size));
 	}
 
 	return NULL;
@@ -3326,6 +3365,13 @@ static void *writer(void *arg)
 					file->pathname);
 				exit_code = local_fail = TRUE;
 			}
+
+			if((block->offset + block->size) > block->buffer->uncomp_size)
+				EXIT_UNSQUASH("File system corrupted - trying to "
+					"read beyond data block (block size "
+					"%d, offset %d, size %d)\n",
+					block->buffer->uncomp_size,
+					block->offset, block->size);
 
 			if(local_fail == FALSE) {
 				res = write_block(file_fd,
@@ -3431,6 +3477,13 @@ static void *cat_writer(void *arg)
 				exit_code = local_fail = TRUE;
 			}
 
+			if((block->offset + block->size) > block->buffer->uncomp_size)
+				EXIT_UNSQUASH("File system corrupted - trying to "
+					"read beyond data block (block size "
+					"%d, offset %d, size %d)\n",
+					block->buffer->uncomp_size,
+					block->offset, block->size);
+
 			if(local_fail == FALSE) {
 				res = write_block(writer_fd,
 					block->buffer->data + block->offset,
@@ -3498,7 +3551,7 @@ static void *inflator(void *arg)
  		 * occurred, clear pending flag, set error appropriately and
  		 * wake up any threads waiting on this block
  		 */ 
-		cache_block_ready(entry, res == -1);
+		cache_block_ready(entry, res == -1, res);
 	}
 
 	return NULL;

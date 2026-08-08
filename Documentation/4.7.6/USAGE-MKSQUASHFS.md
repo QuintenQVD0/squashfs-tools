@@ -1,4 +1,4 @@
-# MKSQUASHFS 4.7.5 - a tool to create Squashfs filesystems
+# MKSQUASHFS 4.7.6 - a tool to create Squashfs filesystems
 
 This file describes how to use Mksquashfs, and it has the following sections:
 
@@ -11,16 +11,17 @@ This file describes how to use Mksquashfs, and it has the following sections:
 7. [CPIO style handling of source pathnames in Mksquashfs](#7-cpio-style-handling-of-source-pathnames-in-mksquashfs)
 8. [Specifying the UIDs/GIDs used in the filesystem](#8-specifying-the-uidsgids-used-in-the-filesystem)
 9. [Specifying the file permissions used in the filesystem](#9-specifying-the-file-permissions-used-in-the-filesystem)
-10. [Excluding files from the filesystem](#10-excluding-files-from-the-filesystem)
-11. [Parallel file reading and options](#11-parallel-file-reading-and-options)
-12. [Reducing CPU and I/O usage](#12-reducing-cpu-and-io-usage)
-13. [Filtering and adding extended attributes (xattrs)](#13-filtering-and-adding-extended-attributes-xattrs)
-14. [Pseudo file support](#14-pseudo-file-support)
-15. [Extended pseudo file definitions with timestamps](#15-extended-pseudo-file-definitions-with-timestamps)
-16. [Appending to Squashfs filesystems](#16-appending-to-squashfs-filesystems)
-17. [Appending recovery file feature](#17-appending-recovery-file-feature)
-18. [Mksquashfs Actions introduction](#18-mksquashfs-actions-introduction)
-19. [Miscellaneous options](#19-miscellaneous-options)
+10. [Symbolic link handling and dereferencing](#10-symbolic-link-handling-and-dereferencing)
+11. [Excluding files from the filesystem](#11-excluding-files-from-the-filesystem)
+12. [Parallel file reading and options](#12-parallel-file-reading-and-options)
+13. [Reducing CPU and I/O usage](#13-reducing-cpu-and-io-usage)
+14. [Filtering and adding extended attributes (xattrs)](#14-filtering-and-adding-extended-attributes-xattrs)
+15. [Pseudo file support](#15-pseudo-file-support)
+16. [Extended pseudo file definitions with timestamps](#16-extended-pseudo-file-definitions-with-timestamps)
+17. [Appending to Squashfs filesystems](#17-appending-to-squashfs-filesystems)
+18. [Appending recovery file feature](#18-appending-recovery-file-feature)
+19. [Mksquashfs Actions introduction](#19-mksquashfs-actions-introduction)
+20. [Miscellaneous options](#20-miscellaneous-options)
 
 ## 1. INTRODUCTION AND BASIC USAGE
 
@@ -36,7 +37,7 @@ mksquashfs source1 source2 ...  FILESYSTEM [OPTIONS] [-e list of exclude files]
 Where source1 source2 are the directories or files you want to be put into the
 filesystem, and FILESYSTEM is the name of the output filesystem.  This can be a
 file or a block device.  If the file already exists or it is a block device
-Mksquashfs will try append to it (see [section 16](#16-appending-to-squashfs-filesystems)) unless the -noappend option is
+Mksquashfs will try append to it (see [section 17](#17-appending-to-squashfs-filesystems)) unless the -noappend option is
 given.
 
 Most simple usage is a single source directory:
@@ -676,7 +677,143 @@ The permission bits can also be ```u```, ```g``` or ```o```, which takes the per
 the user, group or other of the file respectively.
 
 
-## 10. EXCLUDING FILES FROM THE FILESYSTEM
+## 10. SYMBOLIC LINK HANDLING AND DEREFERENCING
+
+When Mksquashfs encounters a symbolic link when archiving a directory, it stores the symbolic link "as is" in the filesystem.  If the symbolic link points outside of the directories being archived this will produce a dangling symbolic link.  Obviously the symbolic link will also become dangling if the file or directory it points to is excluded.
+
+Mksquashfs has a number of options which can be used to follow or dereference symbolic links.
+
+#### -dereference
+This is a blanket option and it behaves in a similar fashion to the GNU Tar --dereference (-h) option.  All symbolic links are followed and replaced with what they point to.  If a symbolic link cannot be followed it is deleted, and not stored in the filesystem.
+
+#### -deref \<response\>
+This is similar to the -dereference option except you can choose what happens if the symbolic link is unresolvable and can't be followed, the response ```delete``` will delete the symbolic link, and the response ```keep``` will keep the symbolic link.
+
+#### -deref-path \<pathname\>
+The previous options apply to all symbolic links, whereas this option allows you to selectively choose which symbolic links to dereference based on the pathname.  If the symbolic link can't be followed, it is deleted.
+
+#### A new action dereference(response)
+This action will dereference the symbolic link where the action tests return TRUE.  There are a large number of action tests available for example ```name```, ```pathname```, ```user``` etc. but the most useful and interesting in this context is ```exists```.
+
+### 10.1. The following examples will illustrate how the different options can be used.
+
+First imagine a directory called test, with the following contents:
+
+```
+drwxrwxr-x phillip/phillip          83 2026-07-23 02:36 /test
+lrwxrwxrwx phillip/phillip           9 2026-07-23 02:34 /test/goodbye_sym -> ./goodbye
+-rw-rw-r-- phillip/phillip           6 2026-07-23 02:34 /test/hello
+lrwxrwxrwx phillip/phillip           7 2026-07-23 02:34 /test/hello_sym -> ./hello
+lrwxrwxrwx phillip/phillip          19 2026-07-23 02:36 /test/outside_sym -> /home/phillip/hello
+```
+
+There are three symbolic links and one file.  One of the symbolic links (hello_sym) points to the file ```hello``` in the same directory using a relative path.  Another symbolic link (outside_sym) points to a file outside the ```test``` directory using an absolute path.  Finally the last symbolic link (goodbye_sym) points to a non-existent file ```goodbye``` using a relative path.
+
+Obviously if you run Mksquashfs without any of the above options, you'll get a filesystem exactly matching the above.
+
+#### Example 1, using -dereference
+
+```
+phillip@avalon:/tmp $ mksquashfs test test.sqsh -dereference -quiet -no-progress
+Cannot dereference test/goodbye_sym, ignoring
+
+phillip@avalon:/tmp $ unsquashfs -lls -d test test.sqsh
+drwxrwxr-x phillip/phillip          64 2026-07-23 02:36 test
+-rw-rw-r-- phillip/phillip           6 2026-07-23 02:34 test/hello
+-rw-rw-r-- phillip/phillip           6 2026-07-23 02:34 test/hello_sym
+-rw-r--r-- phillip/phillip           6 2026-05-24 19:05 test/outside_sym
+```
+
+The dangling symbolic link ```goodbye_sym``` has been deleted, and all other symbolic links have been dereferenced to the file that they point to.  In the case of ```hello``` and ```hello_sym``` they are both hard-linked to the same file (or inode).
+
+#### Example 2, using -deref keep
+
+```
+phillip@avalon:/tmp $ mksquashfs test test.sqsh -deref keep -quiet -no-progress
+Cannot dereference test/goodbye_sym, keeping as symbolic link
+
+phillip@avalon:/tmp $ unsquashfs -lls -d test test.sqsh
+drwxrwxr-x phillip/phillip          83 2026-07-23 02:36 test
+lrwxrwxrwx phillip/phillip           9 2026-07-23 02:34 test/goodbye_sym -> ./goodbye
+-rw-rw-r-- phillip/phillip           6 2026-07-23 02:34 test/hello
+-rw-rw-r-- phillip/phillip           6 2026-07-23 02:34 test/hello_sym
+-rw-r--r-- phillip/phillip           6 2026-05-24 19:05 test/outside_sym
+```
+
+Here Mksquashfs has been told to retain any symbolic link that can't be followed, and as such ```goodbye_sym``` still appears in the output filesystem as a symbolic link.   This can useful when the symbolic link is unresolvable at build time, but it will point to a valid file when the filesystem is mounted, and so you don't want it to be deleted.
+
+#### Example 3, using -deref-path
+
+Often you do not want the blanket approach of the previous options, where **every** symbolic link in the output filesystem is dereferenced.  In the above example ```test``` directory there is no need to dereference ```hello_sym``` because this points to a file in the same directory using a relative path.  The only symbolic link which needs to be dereferenced is ```outside_sym``` because this points outside of the directory being archived.  In this case you can use the ```-deref-path``` option to selectively dereference only the symbolic links that need dereferencing.
+
+```
+phillip@avalon:/tmp $ mksquashfs test test.sqsh -deref-path outside_sym -quiet -no-progress
+phillip@avalon:/tmp $ unsquashfs -lls -d test test.sqsh
+drwxrwxr-x phillip/phillip          83 2026-07-23 02:36 test
+lrwxrwxrwx phillip/phillip           9 2026-07-23 02:34 test/goodbye_sym -> ./goodbye
+-rw-rw-r-- phillip/phillip           6 2026-07-23 02:34 test/hello
+lrwxrwxrwx phillip/phillip           7 2026-07-23 02:34 test/hello_sym -> ./hello
+-rw-r--r-- phillip/phillip           6 2026-05-24 19:05 test/outside_sym
+```
+
+Here Mksquashfs has only dereferenced ```outside_sym``` leaving all the other symbolic links "as is".
+
+#### Example 4, dereferencing using the Actions system
+
+The Actions system allows symbolic link dereferencing to be selectively performed, where a symbolic link will only be dereferenced if a test (or series of tests) return TRUE.
+
+For example, the above example 3 can be re-expressed as follows (in fact -deref-path is internally implemented as this, so people don't need to understand actions to do that).
+
+```
+phillip@avalon:/tmp $ mksquashfs test test.sqsh -action "dereference@pathname(outside_sym)" -quiet -no-progress
+phillip@avalon:/tmp $ unsquashfs -lls -d test test.sqsh
+drwxrwxr-x phillip/phillip          83 2026-07-23 02:36 test
+lrwxrwxrwx phillip/phillip           9 2026-07-23 02:34 test/goodbye_sym -> ./goodbye
+-rw-rw-r-- phillip/phillip           6 2026-07-23 02:34 test/hello
+lrwxrwxrwx phillip/phillip           7 2026-07-23 02:34 test/hello_sym -> ./hello
+-rw-r--r-- phillip/phillip           6 2026-05-24 19:05 test/outside_sym
+```
+
+The Action is **dereference @ pathname(outside_sym)** which means if a file matches on the pathname ```outside_sym``` then run the ```dereference``` action on it.
+
+#### Example 5, more dereferencing using the Actions system
+
+Now it should be clear that if you have a directory hierarchy of symbolic links that you want dereferenced, it is clumsy to have to dereference each symbolic link separately.  The Actions system has a test which matches on a directory and everything within it (and sub-directories) called ```subpathname```, and so to dereference everything within the ```lib``` directory you would use ```subpathname(lib)```.
+
+For example to dereference everything in the root directory and below:
+
+```
+phillip@avalon:/tmp $ mksquashfs test test.sqsh -action "dereference@subpathname(/)" -quiet -no-progress
+Cannot dereference test/goodbye_sym, keeping as symbolic link
+
+phillip@avalon:/tmp $ unsquashfs -lls -d test test.sqsh
+drwxrwxr-x phillip/phillip          83 2026-07-23 02:36 test
+lrwxrwxrwx phillip/phillip           9 2026-07-23 02:34 test/goodbye_sym -> ./goodbye
+-rw-rw-r-- phillip/phillip           6 2026-07-23 02:34 test/hello
+-rw-rw-r-- phillip/phillip           6 2026-07-23 02:34 test/hello_sym
+-rw-r--r-- phillip/phillip           6 2026-05-24 19:05 test/outside_sym
+```
+
+From the above it should be clear running the dereference action on a non-symbolic link does nothing, it is a no-op.  It should also be clear that the default behaviour of the dereference action is to keep symbolic links that can't be followed, to make the action delete a symbolic link you can use ```dereference(delete)```.
+
+#### Example 6, advanced dereferencing using the Actions system
+
+The above Actions use the pathname of a symbolic link to determine whether to dereference it or not.  But it would be better if we could directly ask Mksquashfs whether a symbolic link will be followable in the archived filesystem, and if it won't be, then dereference it at build time.  This takes the guess work out of which symbolic links to dereference.  The Action test that does this is called ```exists```.
+
+```
+phillip@avalon:/tmp $ mksquashfs test test.sqsh -action "dereference(delete)@ ! exists" -quiet -no-progress
+Cannot dereference test/goodbye_sym, deleting
+
+phillip@avalon:/tmp $ unsquashfs -lls -d test test.sqsh
+drwxrwxr-x phillip/phillip          64 2026-07-23 02:36 test
+-rw-rw-r-- phillip/phillip           6 2026-07-23 02:34 test/hello
+lrwxrwxrwx phillip/phillip           7 2026-07-23 02:34 test/hello_sym -> ./hello
+-rw-r--r-- phillip/phillip           6 2026-05-24 19:05 test/outside_sym
+```
+
+Because we want to dereference the symbolic links where the file or directory pointed to doesn't exist in the output filesystem, the output from ```exists``` is negated with the unary ! operator.
+
+## 11. EXCLUDING FILES FROM THE FILESYSTEM
 
 The ```-e``` and ```-ef``` options allow files/directories to be specified which are
 excluded from the output filesystem.  The ```-e``` option takes the exclude
@@ -689,7 +826,7 @@ extended wildcard matching.  Basic exclude matching is a legacy feature
 retained for backwards compatibility with earlier versions of Mksquashfs.
 Extended wildcard matching should be used in preference.
 
-### 10.1 BASIC EXCLUDE MATCHING
+### 11.1 BASIC EXCLUDE MATCHING
 
 Each exclude file is treated as an exact match of a file/directory in
 the source directories.  If an exclude file/directory is absolute (i.e.
@@ -704,7 +841,7 @@ the sources in turn, i.e.
 Will generate exclude files /tmp/source1/ex2, /tmp/source1/ex1, source2/ex1,
 /tmp/source1/out/ex3 and source2/out/ex3.
 
-### 10.2 EXTENDED EXCLUDE FILE HANDLING
+### 11.2 EXTENDED EXCLUDE FILE HANDLING
 
 Extended exclude file matching treats each exclude file as a wildcard or
 regex expression.  To enable wildcard matching specify the ```-wildcards```
@@ -780,7 +917,7 @@ Exclude all files matching "*.gz" anywhere in the source directories,
 except those with "data" in the name.
 
 
-## 11. PARALLEL FILE READING AND OPTIONS
+## 12. PARALLEL FILE READING AND OPTIONS
 
 Modern computers can have 16 cores/32 threads or more [^2], and systems with 8
 cores/16 threads are becoming standard.   What this increase in computational
@@ -903,7 +1040,7 @@ between different input files/media and performance.  If you think Mksquashfs
 is I/O bound then you should experiment with larger reader threads which may
 increase performance.
 
-### 11.1 SPECIALISED SMALL READER AND BLOCK READER THREADS
+### 12.1 SPECIALISED SMALL READER AND BLOCK READER THREADS
 
 The amount of reader threads you need to maximise I/O when reading small files,
 is often different to the amount of reader threads you need when reading larger
@@ -935,7 +1072,7 @@ Unix machines around since the early 1990s (such as the Sequent Symmetry),
 but these were multi-user systems typically supporting 50 or more users.
 
 
-## 12. REDUCING CPU AND I/O USAGE
+## 13. REDUCING CPU AND I/O USAGE
 
 By default Mksquashfs will use all the CPUs available to compress and create the
 filesystem, and will read from the source files and write to the output
@@ -965,7 +1102,7 @@ with -processors set to the minimum of 1.  In this case you can use -throttle
 in addition to -processors or on its own.
 
 
-## 13. FILTERING AND ADDING EXTENDED ATTRIBUTES (XATTRs)
+## 14. FILTERING AND ADDING EXTENDED ATTRIBUTES (XATTRs)
 
 Mksquashfs has a number of options which allow extended attributes (xattrs) to
 be filtered from the source files or added to the created Squashfs filesystem.
@@ -1023,7 +1160,7 @@ mksquashfs dir image.sqfs -xattrs-add "user.comment=0saGVsbG8Ad29ybGQ="
 mksquashfs dir image.sqfs -xattrs-add "user.comment=0x68656c6c6f00776f726c64"
 ```
 
-## 14. PSEUDO FILE SUPPORT
+## 15. PSEUDO FILE SUPPORT
 
 Mksquashfs supports pseudo files, these allow files, directories, character
 devices, block devices, fifos, symbolic links, hard links and extended
@@ -1042,7 +1179,7 @@ Two Mksquashfs options are supported, ```-p``` allows one pseudo file to be spec
 on the command line, and ```-pf``` allows a pseudo file to be specified containing a
 list of pseduo definitions, one per line.
 
-### 14.1 CREATING A DYNAMIC FILE
+### 15.1 CREATING A DYNAMIC FILE
 
 Pseudo definition
 
@@ -1102,7 +1239,7 @@ given a device, fifo, or named socket will place that special file within the
 Squashfs filesystem, the above allows input from these special files to be
 captured and placed in the Squashfs filesystem.
 
-### 14.2 CREATING A BLOCK OR CHARACTER DEVICE
+### 15.2 CREATING A BLOCK OR CHARACTER DEVICE
 
 Pseudo definition
 
@@ -1129,7 +1266,7 @@ creates a character device "/dev/chr_dev" with major:minor 100:1 and a block
 device "/dev/blk_dev" with major:minor 200:200, both with root uid/gid and a
 mode of rw-rw-rw.
 
-### 14.3 CREATING A DIRECTORY
+### 15.3 CREATING A DIRECTORY
 
 Pseudo definition
 
@@ -1149,7 +1286,7 @@ For example:
 
 creates a directory "/pseudo_dir" with root uid/gid and mode of rw-rw-rw.
 
-### 14.4 CREATING A SYMBOLIC LINK
+### 15.4 CREATING A SYMBOLIC LINK
 
 Pseudo definition
 
@@ -1169,7 +1306,7 @@ symlink s 0 root root example
 
 Creates a symlink "symlink" to file "example" with root uid/gid.
 
-### 14.5 CREATING REFERENCES TO FILES
+### 15.5 CREATING REFERENCES TO FILES
 
 The "f" Pseudo definition allows a regular file to be created from the output of
 a command (or shell).  Often this is used to reference a file outside the source
@@ -1234,7 +1371,7 @@ link L char-dev
 Will create a Hard Link named "link" to the character device called "char-dev"
 created by the previous Pseudo definition.
 
-### 14.6 CREATING SOCKETS/FIFOS
+### 15.6 CREATING SOCKETS/FIFOS
 
 Pseudo definition
 
@@ -1265,7 +1402,7 @@ filename x name=val
 Will add the extended attribute <name\> to <filename\> with <val\> contents.  See
 [Section 13](#13-filtering-and-adding-extended-attributes-xattrs) for a description of the <val\> formats supported.
 
-### 14.8 MODIFYING ATTRIBUTES OF AN EXISTING FILE
+### 15.8 MODIFYING ATTRIBUTES OF AN EXISTING FILE
 
 Pseudo definition
 
@@ -1319,7 +1456,7 @@ automatically create the leading directories:
 % mksquashfs - image.sqfs -pd "d 0777 0 0" -p "/dir1/dir2/file f 0777 0 0 echo hello world"
 ```
 
-## 15. EXTENDED PSEUDO FILE DEFINITIONS WITH TIMESTAMPS
+## 16. EXTENDED PSEUDO FILE DEFINITIONS WITH TIMESTAMPS
 
 The Pseudo file definitions described above do not allow the timestamp of the
 created file to be specified, and the files will be timestamped with the current
@@ -1357,7 +1494,7 @@ shell by backslashes, i.e.
 Obviously anything "date" accepts as a valid string can be used, such as
 "yesterday", "last week" etc.
 
-## 15.1 SPECIFYING A DEFAULT PSEUDO DIRECTORY DEFINITION WITH TIMESTAMP
+## 16.1 SPECIFYING A DEFAULT PSEUDO DIRECTORY DEFINITION WITH TIMESTAMP
 
 The option
 
@@ -1374,7 +1511,7 @@ a <time\> timestamp.  <time\> can be either an unsigned decimal integer or a
 "date" command.
 
 
-## 16. APPENDING TO SQUASHFS FILESYSTEMS
+## 17. APPENDING TO SQUASHFS FILESYSTEMS
 
 Running Mksquashfs with the output file containing an existing Squashfs
 filesystem will add the source items to the existing filesystem.  By default,
@@ -1420,7 +1557,7 @@ will create a filesystem with the two source trees, but only the changed files
 will take extra room, the unchanged files will be detected as duplicates.
 
 
-## 17. APPENDING RECOVERY FILE FEATURE
+## 18. APPENDING RECOVERY FILE FEATURE
 
 Recovery files are created when appending to existing Squashfs filesystems.
 This allows the original filesystem to be recovered if Mksquashfs aborts
@@ -1443,7 +1580,7 @@ The writing of the recovery file can be disabled by specifying the
 ```-no-recovery``` option.
 
 
-## 18. MKSQUASHFS ACTIONS INTRODUCTION
+## 19. MKSQUASHFS ACTIONS INTRODUCTION
 
 The Mksquashfs Actions code allows an "action" to be executed on a file if one
 or more "tests" succeed.  If you're familiar with the "find" command, then an
@@ -1492,7 +1629,7 @@ operators && (and), || (or) and ! (not), and can be bracketed.
 Please see the ACTIONS-README file for syntax and extra information.
 
 
-## 19. MISCELLANEOUS OPTIONS
+## 20. MISCELLANEOUS OPTIONS
 
 The ```-info``` option displays the files/directories as they are compressed and
 added to the filesystem.  The original uncompressed size of each file is

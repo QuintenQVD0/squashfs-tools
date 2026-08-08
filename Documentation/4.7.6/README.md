@@ -1,27 +1,71 @@
-# SQUASHFS-TOOLS 4.7.5 - A squashed read-only filesystem for Linux
+# SQUASHFS-TOOLS 4.7.6 - A squashed read-only filesystem for Linux
 
-Welcome to Squashfs-Tools 4.7.5.  This is a bug fix and minor improvements release, and it is the fifth update to the 4.7 release last year.
+Welcome to Squashfs-Tools 4.7.6.  This release adds symbolic link improvements, new LZ4 compression options, new Unsquashfs permissions options, zip archive reading and other improvements.  This is the sixth update to the 4.7 release last year.
 
 The 4.7 release brought substantial improvements to the tools, in particular Mksquashfs can now be 20% to more than ten times faster (dependant on source media and input files).  The help system has also been completely rewritten and improved for Mksquashfs, Unsquashfs, Sqfstar and Sqfscat.  There are also new options for building reproducible images, and a lot of other improvements.
 
-Please see the [INSTALL.md](INSTALL.md) file for instructions on installing the tools, and the
-[USAGE.md](USAGE.md) file for an introduction to the various tools, and the
+Please see the [INSTALL.md](INSTALL.md) file for instructions on installing the tools, and the [USAGE.md](USAGE.md) file for an introduction to the various tools, and the
 usage files for [Mksquashfs](USAGE-MKSQUASHFS.md), [Unsquashfs](USAGE-UNSQUASHFS.md), [Sqfstar](USAGE-SQFSTAR.md) and [Sqfscat](USAGE-SQFSCAT.md).
 
 This README has the following sections:
 
-1. [Improvements and bug fixes in 4.7.5](#1-improvements-and-bug-fixes-in-475)
-2. [Improvements and bug fixes in 4.7.3 and 4.7.4](#2-improvements-and-bug-fixes-in-473-and-474)
-3. [Improvements and bug fixes in 4.7.1 and 4.7.2](#3-improvements-and-bug-fixes-in-471-and-472)
-4. [Improvements in 4.7](#4-improvements-in-47)
-5. [Streaming filesystem to STDOUT](#5-streaming-filesystem-to-stdout)
-6. [Align(value) action](#6-alignvalue-action)
-7. [Parallel file reading and options](#7-parallel-file-reading-and-options)
-8. [Help system and options](#8-help-system-and-options)
-9. [Reproducible filesystem images and new options](#9-reproducible-filesystem-images-and-new-options)
-10. [Author info](#10-author-info)
+1. [Improvements in 4.7.6](#1-improvements-in-476)
+2. [Improvements and bug fixes in 4.7.5](#2-improvements-and-bug-fixes-in-475)
+3. [Improvements and bug fixes in 4.7.3 and 4.7.4](#3-improvements-and-bug-fixes-in-473-and-474)
+4. [Improvements and bug fixes in 4.7.1 and 4.7.2](#4-improvements-and-bug-fixes-in-471-and-472)
+5. [Improvements in 4.7](#5-improvements-in-47)
+6. [Mksquashfs symbolic link handling improvements](#6-mksquashfs-symbolic-link-handling-improvements)
+7. [Unsquashfs symbolic link handling improvements](#7-unsquashfs-symbolic-link-handling-improvements)
+8. [Streaming filesystem to STDOUT](#8-streaming-filesystem-to-stdout)
+9. [Align(value) action](#9-alignvalue-action)
+10. [Parallel file reading and options](#10-parallel-file-reading-and-options)
+11. [Help system and options](#11-help-system-and-options)
+12. [Reproducible filesystem images and new options](#12-reproducible-filesystem-images-and-new-options)
+13. [Author info](#13-author-info)
 
-## 1. IMPROVEMENTS AND BUG FIXES IN 4.7.5
+## 1. IMPROVEMENTS IN 4.7.6
+
+1. Mksquashfs symbolic link handling improvements
+
+    1. New -dereference option that follows symbolic links, and archives the files or directories they point to.
+    2. New -deref \<response\> option that follows symbolic links like -dereference, but where \<response\> determines what happens if the symbolic link can't be dereferenced, response can be "keep" or "delete".
+    3. New -deref \<path\> option, which follows the symbolic link \<path\> and archives the file or directory it points to.  This is an alternative to the above blanket options which apply to all symbolic links.
+    4. New dereference(response) action, which follows the symbolic link where the action tests return TRUE.  Again, this is an alternative to the above blanket options which apply to all symbolic links.
+
+2. New LZ4 compressor options
+
+    1. -Xacceleration \<acceleration\>, accelerate compression by value between 1 .. 65537
+    2. -Xcompression-level \<compression-level\>, use compression level 1 .. 12.
+
+3. New Mksquashfs -zip option which reads zip archives.
+
+4. Unsquashfs symbolic link handling improvements
+
+    1. Unsquashfs by default now follows intermediate symbolic links in extract/exclude pathnames, and extracts both the symbolic links and the files and directories they point to.
+    2. The -follow-symlinks option now follows leaf symbolic links (i.e. the pathname ends in a symbolic link) which by default are not followed.
+    3. -follow-symlinks no longer implies -no-wildcards, and wildcards are enabled by default, and regular expressions can be used with -regex.
+
+5. Other Unsquashfs improvements
+
+    1. New -force-uid \<user\> option which sets all file and directory uids to specified \<user\>.  \<user\> can be either an integer uid or user name (superuser only),
+    2. New -force-gid \<gid\> option which sets all file and directory gids to specified \<group\>.  \<group\> can be either an integer gid or group name (superuser only)
+    3. New -force-file-mode \<mode\> option which sets all file (non-directory) permissions to \<mode\>.  \<Mode\> can be symbolic or octal.
+    4. New -force-dir-mode \<mode\> option which sets all directory permissions to \<mode\>.  \<Mode\> can be symbolic or octal.
+    5. New -max-files \<number\> option which limits how many files Unsquashfs opens and writes to at the same time.
+    6. New -mem-default option which prints default memory usage in Mbytes.
+
+6. Other improvements
+
+    1. Automatic Makefile dependencies.
+    2. Use prebuilt manpages if GNU sed isn't available at build time.
+    2. Remove obsolete and deprecated lzma_wrapper.
+
+7.  Major bug fixes
+
+    1. Fix data race when reading fragments in duplicate checking (caused by elimination of "fragment block stall" in 4.7).
+    2. Fix data race when spilling blocks to disk in duplicate checking (caused by sparse file reading optimisation in 4.7.3).
+
+## 2. IMPROVEMENTS AND BUG FIXES IN 4.7.5
 
 1. New options & improvements
 
@@ -46,7 +90,7 @@ This README has the following sections:
     7. Mksquashfs/Sqfstar should produce identical output with only pseudo files.
     8. Define SEEK_DATA if not defined by C library.
 
-## 2. IMPROVEMENTS AND BUG FIXES IN 4.7.3 AND 4.7.4
+## 3. IMPROVEMENTS AND BUG FIXES IN 4.7.3 AND 4.7.4
 
 1. Mksquashfs/Sqfstar can now stream output filesystem to STDOUT.
 
@@ -76,7 +120,7 @@ This README has the following sections:
 	2. Fix regression introduced by -stream option
 	3. Fix build on big-endian machines (Daniel Néri)
 
-## 3. IMPROVEMENTS AND BUG FIXES IN 4.7.1 AND 4.7.2
+## 4. IMPROVEMENTS AND BUG FIXES IN 4.7.1 AND 4.7.2
 
 1. Fix regression in -offset (-o) where it stopped working in Mksquashfs and
    Sqfstar.
@@ -100,7 +144,7 @@ This README has the following sections:
 11. Fix BLOCK_READER_THREADS typo in Makefile (Alexandru Ardelean).
 12. print_pager: make inline quoted_bs_char() static.
 
-## 4. IMPROVEMENTS IN 4.7
+## 5. IMPROVEMENTS IN 4.7
 
 1. Mksquashfs now reads files in parallel from the input directories
 
@@ -158,7 +202,264 @@ This README has the following sections:
 
 	If set, this is used as the directory to write the file sqfs_cmdline which contains the command line arguments given to Mksquashfs etc.  Intended to be used to debug scripts/discover what is being passed to Mksquashfs.
 
-## 5. STREAMING FILESYSTEM TO STDOUT
+## 6. MKSQUASHFS SYMBOLIC LINK HANDLING IMPROVEMENTS
+
+When Mksquashfs encounters a symbolic link when archiving a directory, it stores the symbolic link "as is" in the filesystem.  If the symbolic link points outside of the directories being archived this will produce a dangling symbolic link.  Obviously the symbolic link will also become dangling if the file or directory it points to is excluded.
+
+This release has added a number of options to dereference all or some symbolic links.
+
+#### -dereference
+This is a blanket option and it behaves in a similar fashion to the GNU Tar --dereference (-h) option.  All symbolic links are followed and replaced with what they point to.  If a symbolic link cannot be followed it is deleted, and not stored in the filesystem.
+
+#### -deref \<response\>
+This is similar to the -dereference option except you can choose what happens if the symbolic link is unresolvable and can't be followed, the response ```delete``` will delete the symbolic link, and the response ```keep``` will keep the symbolic link.
+
+#### -deref-path \<pathname\>
+The previous options apply to all symbolic links, whereas this option allows you to selectively choose which symbolic links to dereference based on the pathname.  If the symbolic link can't be followed, it is deleted.
+
+#### A new action dereference(response)
+This action will dereference the symbolic link where the action tests return TRUE.  There are a large number of action tests available for example ```name```, ```pathname```, ```user``` etc. but the most useful and interesting in this context is ```exists```.
+
+### 6.1 The following examples will illustrate how the different options can be used.
+
+First imagine a directory called test, with the following contents:
+
+```
+drwxrwxr-x phillip/phillip          83 2026-07-23 02:36 /test
+lrwxrwxrwx phillip/phillip           9 2026-07-23 02:34 /test/goodbye_sym -> ./goodbye
+-rw-rw-r-- phillip/phillip           6 2026-07-23 02:34 /test/hello
+lrwxrwxrwx phillip/phillip           7 2026-07-23 02:34 /test/hello_sym -> ./hello
+lrwxrwxrwx phillip/phillip          19 2026-07-23 02:36 /test/outside_sym -> /home/phillip/hello
+```
+
+There are three symbolic links and one file.  One of the symbolic links (hello_sym) points to the file ```hello``` in the same directory using a relative path.  Another symbolic link (outside_sym) points to a file outside the ```test``` directory using an absolute path.  Finally the last symbolic link (goodbye_sym) points to a non-existent file ```goodbye``` using a relative path.
+
+Obviously if you run Mksquashfs without any of the above options, you'll get a filesystem exactly matching the above.
+
+#### Example 1, using -dereference
+
+```
+phillip@avalon:/tmp $ mksquashfs test test.sqsh -dereference -quiet -no-progress
+Cannot dereference test/goodbye_sym, ignoring
+
+phillip@avalon:/tmp $ unsquashfs -lls -d test test.sqsh
+drwxrwxr-x phillip/phillip          64 2026-07-23 02:36 test
+-rw-rw-r-- phillip/phillip           6 2026-07-23 02:34 test/hello
+-rw-rw-r-- phillip/phillip           6 2026-07-23 02:34 test/hello_sym
+-rw-r--r-- phillip/phillip           6 2026-05-24 19:05 test/outside_sym
+```
+
+The dangling symbolic link ```goodbye_sym``` has been deleted, and all other symbolic links have been dereferenced to the file that they point to.  In the case of ```hello``` and ```hello_sym``` they are both hard-linked to the same file (or inode).
+
+#### Example 2, using -deref keep
+
+```
+phillip@avalon:/tmp $ mksquashfs test test.sqsh -deref keep -quiet -no-progress
+Cannot dereference test/goodbye_sym, keeping as symbolic link
+
+phillip@avalon:/tmp $ unsquashfs -lls -d test test.sqsh
+drwxrwxr-x phillip/phillip          83 2026-07-23 02:36 test
+lrwxrwxrwx phillip/phillip           9 2026-07-23 02:34 test/goodbye_sym -> ./goodbye
+-rw-rw-r-- phillip/phillip           6 2026-07-23 02:34 test/hello
+-rw-rw-r-- phillip/phillip           6 2026-07-23 02:34 test/hello_sym
+-rw-r--r-- phillip/phillip           6 2026-05-24 19:05 test/outside_sym
+```
+
+Here Mksquashfs has been told to retain any symbolic link that can't be followed, and as such ```goodbye_sym``` still appears in the output filesystem as a symbolic link.   This can useful when the symbolic link is unresolvable at build time, but it will point to a valid file when the filesystem is mounted, and so you don't want it to be deleted.
+
+#### Example 3, using -deref-path
+
+Often you do not want the blanket approach of the previous options, where **every** symbolic link in the output filesystem is dereferenced.  In the above example ```test``` directory there is no need to dereference ```hello_sym``` because this points to a file in the same directory using a relative path.  The only symbolic link which needs to be dereferenced is ```outside_sym``` because this points outside of the directory being archived.  In this case you can use the ```-deref-path``` option to selectively dereference only the symbolic links that need dereferencing.
+
+```
+phillip@avalon:/tmp $ mksquashfs test test.sqsh -deref-path outside_sym -quiet -no-progress
+phillip@avalon:/tmp $ unsquashfs -lls -d test test.sqsh
+drwxrwxr-x phillip/phillip          83 2026-07-23 02:36 test
+lrwxrwxrwx phillip/phillip           9 2026-07-23 02:34 test/goodbye_sym -> ./goodbye
+-rw-rw-r-- phillip/phillip           6 2026-07-23 02:34 test/hello
+lrwxrwxrwx phillip/phillip           7 2026-07-23 02:34 test/hello_sym -> ./hello
+-rw-r--r-- phillip/phillip           6 2026-05-24 19:05 test/outside_sym
+```
+
+Here Mksquashfs has only dereferenced ```outside_sym``` leaving all the other symbolic links "as is".
+
+#### Example 4, dereferencing using the Actions system
+
+The Actions system allows symbolic link dereferencing to be selectively performed, where a symbolic link will only be dereferenced if a test (or series of tests) return TRUE.
+
+For example, the above example 3 can be re-expressed as follows (in fact -deref-path is internally implemented as this, so people don't need to understand actions to do that).
+
+```
+phillip@avalon:/tmp $ mksquashfs test test.sqsh -action "dereference@pathname(outside_sym)" -quiet -no-progress
+phillip@avalon:/tmp $ unsquashfs -lls -d test test.sqsh
+drwxrwxr-x phillip/phillip          83 2026-07-23 02:36 test
+lrwxrwxrwx phillip/phillip           9 2026-07-23 02:34 test/goodbye_sym -> ./goodbye
+-rw-rw-r-- phillip/phillip           6 2026-07-23 02:34 test/hello
+lrwxrwxrwx phillip/phillip           7 2026-07-23 02:34 test/hello_sym -> ./hello
+-rw-r--r-- phillip/phillip           6 2026-05-24 19:05 test/outside_sym
+```
+
+The Action is **dereference @ pathname(outside_sym)** which means if a file matches on the pathname ```outside_sym``` then run the ```dereference``` action on it.
+
+#### Example 5, more dereferencing using the Actions system
+
+Now it should be clear that if you have a directory hierarchy of symbolic links that you want dereferenced, it is clumsy to have to dereference each symbolic link separately.  The Actions system has a test which matches on a directory and everything within it (and sub-directories) called ```subpathname```, and so to dereference everything within the ```lib``` directory you would use ```subpathname(lib)```.
+
+For example to dereference everything in the root directory and below:
+
+```
+phillip@avalon:/tmp $ mksquashfs test test.sqsh -action "dereference@subpathname(/)" -quiet -no-progress
+Cannot dereference test/goodbye_sym, keeping as symbolic link
+
+phillip@avalon:/tmp $ unsquashfs -lls -d test test.sqsh
+drwxrwxr-x phillip/phillip          83 2026-07-23 02:36 test
+lrwxrwxrwx phillip/phillip           9 2026-07-23 02:34 test/goodbye_sym -> ./goodbye
+-rw-rw-r-- phillip/phillip           6 2026-07-23 02:34 test/hello
+-rw-rw-r-- phillip/phillip           6 2026-07-23 02:34 test/hello_sym
+-rw-r--r-- phillip/phillip           6 2026-05-24 19:05 test/outside_sym
+```
+
+From the above it should be clear running the dereference action on a non-symbolic link does nothing, it is a no-op.  It should also be clear that the default behaviour of the dereference action is to keep symbolic links that can't be followed, to make the action delete a symbolic link you can use ```dereference(delete)```.
+
+#### Example 6, advanced dereferencing using the Actions system
+
+The above Actions use the pathname of a symbolic link to determine whether to dereference it or not.  But it would be better if we could directly ask Mksquashfs whether a symbolic link will be followable in the archived filesystem, and if it won't be, then dereference it at build time.  This takes the guess work out of which symbolic links to dereference.  The Action test that does this is called ```exists```.
+
+```
+phillip@avalon:/tmp $ mksquashfs test test.sqsh -action "dereference(delete)@ ! exists" -quiet -no-progress
+Cannot dereference test/goodbye_sym, deleting
+
+phillip@avalon:/tmp $ unsquashfs -lls -d test test.sqsh
+drwxrwxr-x phillip/phillip          64 2026-07-23 02:36 test
+-rw-rw-r-- phillip/phillip           6 2026-07-23 02:34 test/hello
+lrwxrwxrwx phillip/phillip           7 2026-07-23 02:34 test/hello_sym -> ./hello
+-rw-r--r-- phillip/phillip           6 2026-05-24 19:05 test/outside_sym
+```
+
+Because we want to dereference the symbolic links where the file or directory pointed to doesn't exist in the output filesystem, the output from ```exists``` is negated with the unary ! operator.
+
+## 7. UNSQUASHFS SYMBOLIC LINK HANDLING IMPROVEMENTS
+
+### 7.1 Symbolic links are traversed in extract/exclude paths
+
+Previously if an extract pathname traversed a symbolic link, then the symbolic link would not be followed, and extraction would stop at that point (this is because a symbolic link is not a directory and so you can't descend into it).
+
+For example imagine a filesystem that has the following contents:
+
+```
+phillip@avalon:/tmp $ unsquashfs -lls -d "" test.sqsh
+drwxrwxr-x phillip/phillip          50 2026-07-24 22:35
+drwxrwxr-x phillip/phillip          30 2026-07-24 22:35 /dir
+-rw-rw-r-- phillip/phillip           8 2026-07-24 22:35 /dir/goodbye
+-rw-rw-r-- phillip/phillip           6 2026-07-23 02:34 /hello
+lrwxrwxrwx phillip/phillip           3 2026-07-24 22:35 /sym -> dir
+```
+
+In particular in the above filesystem there are two paths to the file ```goodbye```, via the directory ```dir``` and via the symbolic link ```sym```.
+
+In previous versions of Unsquashfs, it you specified the extract path "sym/goodbye", it would produce the following:
+
+```
+phillip@avalon:/tmp $ unsquashfs-4.7.5 -n -q test.sqsh sym/goodbye
+phillip@avalon:/tmp $ ls -laR squashfs-root
+squashfs-root:
+total 0
+drwxrwxr-x  2 phillip phillip  40 Jul 24 22:35 .
+drwxrwxrwt 13 root    root    560 Jul 24 22:55 ..
+```
+
+A completely empty directory because ```sym``` was not a directory.
+
+In this new release extract pathnames are always evaluated and symbolic links are followed and resolved before the output is generated.  This means all the directories and files needed to walk the extract pathname are extracted, including the symbolic link and the directory it points to.
+
+For example, with Unsquashfs 4.7.6
+
+```
+phillip@avalon:/tmp $ unsquashfs -n -q test.sqsh sym/goodbye
+phillip@avalon:/tmp $ ls -laR squashfs-root
+squashfs-root:
+total 0
+drwxrwxr-x  3 phillip phillip  80 Jul 24 22:35 .
+drwxrwxrwt 13 root    root    560 Jul 24 23:07 ..
+drwxrwxr-x  2 phillip phillip  60 Jul 24 22:35 dir
+lrwxrwxrwx  1 phillip phillip   3 Jul 24 22:35 sym -> dir
+
+squashfs-root/dir:
+total 16
+drwxrwxr-x 2 phillip phillip 60 Jul 24 22:35 .
+drwxrwxr-x 3 phillip phillip 80 Jul 24 22:35 ..
+-rw-rw-r-- 1 phillip phillip  8 Jul 24 22:35 goodbye
+```
+
+```sym``` is extracted and followed, which descends into ```dir``` and extracts ```goodbye```.
+
+### 7.2 -follow-symlinks option now follows leaf symbolic links
+
+By default intermediate symbolic links are now followed, but leaf symbolic links (the pathname ends in a symbolic link) are not followed by default.  This conforms to the behaviour that most people expect.  To make Unsquashfs follow a leaf symbolic link you can use the ```-follow-symlinks``` option.
+
+For example, without ```-follow-symlinks```
+
+```
+phillip@avalon:/tmp $ unsquashfs -n -q test.sqsh sym
+phillip@avalon:/tmp $ ls -laR squashfs-root
+squashfs-root:
+total 0
+drwxrwxr-x  2 phillip phillip  60 Jul 24 22:35 .
+drwxrwxrwt 13 root    root    560 Jul 24 23:43 ..
+lrwxrwxrwx  1 phillip phillip   3 Jul 24 22:35 sym -> dir
+```
+
+For example, with ```-follow-symlinks```
+
+```
+phillip@avalon:/tmp $ unsquashfs -n -q -follow-symlinks test.sqsh sym
+phillip@avalon:/tmp $ ls -laR squashfs-root
+squashfs-root:
+total 0
+drwxrwxr-x  3 phillip phillip  80 Jul 24 22:35 .
+drwxrwxrwt 13 root    root    560 Jul 24 23:46 ..
+drwxrwxr-x  2 phillip phillip  60 Jul 24 22:35 dir
+lrwxrwxrwx  1 phillip phillip   3 Jul 24 22:35 sym -> dir
+
+squashfs-root/dir:
+total 16
+drwxrwxr-x 2 phillip phillip 60 Jul 24 22:35 .
+drwxrwxr-x 3 phillip phillip 80 Jul 24 22:35 ..
+-rw-rw-r-- 1 phillip phillip  8 Jul 24 22:35 goodbye
+```
+
+#### 7.3 -follow-symlinks no longer implies -no-wildcards
+
+In previous releases, if -follow-symlinks was used to make Unsquashfs follow symbolic links in extract files, then wildcard matching would be disabled, and filenames would be matched exactly.
+
+For example in Unsquashfs 4.7.5, if -follow-symlinks was used in conjunction with the "*" wildcard.
+
+```
+phillip@avalon:/tmp $ unsquashfs-4.7.5 -n -q -follow-symlinks test.sqsh "*"
+Extract filename * can't be resolved
+```
+
+In Unsquashfs 4.7.6, the wildcard works correctly:
+
+```
+phillip@avalon:/tmp $ unsquashfs -n -q -follow-symlinks test.sqsh "*"
+phillip@avalon:/tmp $ ls -laR squashfs-root
+squashfs-root:
+total 16
+drwxrwxr-x  3 phillip phillip 100 Jul 24 22:35 .
+drwxrwxrwt 13 root    root    560 Jul 25 00:07 ..
+drwxrwxr-x  2 phillip phillip  60 Jul 24 22:35 dir
+-rw-rw-r--  1 phillip phillip   6 Jul 23 02:34 hello
+lrwxrwxrwx  1 phillip phillip   3 Jul 24 22:35 sym -> dir
+
+squashfs-root/dir:
+total 16
+drwxrwxr-x 2 phillip phillip  60 Jul 24 22:35 .
+drwxrwxr-x 3 phillip phillip 100 Jul 24 22:35 ..
+-rw-rw-r-- 1 phillip phillip   8 Jul 24 22:35 goodbye
+```
+
+## 8. STREAMING FILESYSTEM TO STDOUT
 
 Mksquashfs and Sqfstar has always written the output filesystem to either a
 file, or to a block device.  But people have often asked if they can write
@@ -218,7 +519,7 @@ Unsquashfs), it can be fixed-up using the Mksquashfs (or Sqfstar) option ```-fix
 % mksquashfs -fix image.sqfs
 ```
 
-## 6. ALIGN(VALUE) ACTION
+## 9. ALIGN(VALUE) ACTION
 
 Recently someone opened an issue on GitHub
 
@@ -290,7 +591,7 @@ That will only align files which are 128 Kbytes or larger in size.
 That is a more complex set of tests which only aligns executable files which
 are owned by root.
 
-## 7. PARALLEL FILE READING AND OPTIONS
+## 10. PARALLEL FILE READING AND OPTIONS
 
 Modern computers can have 16 cores/32 threads or more [^1], and systems with 8
 cores/16 threads are becoming standard.   What this increase in computational
@@ -413,7 +714,7 @@ between different input files/media and performance.  If you think Mksquashfs
 is I/O bound then you should experiment with larger reader threads which may
 increase performance.
 
-### 7.1 Specialised small reader and block reader threads
+### 10.1 Specialised small reader and block reader threads
 
 The amount of reader threads you need to maximise I/O when reading small files,
 is often different to the amount of reader threads you need when reading larger
@@ -443,7 +744,7 @@ the above example again, the block reader thread will work ahead and read the
 [^1]: By this I obviously mean consumer-grade hardware.  There has been 16+ core Unix machines around since the early 1990s (such as the Sequent Symmetry), but these were multi-user systems typically supporting 50 or more users.
 
 
-## 8. HELP SYSTEM AND OPTIONS
+## 11. HELP SYSTEM AND OPTIONS
 
 The help system has been rewritten to remove the annoyances and limitations
 of the previous system.  The previous system printed the entire help text
@@ -519,7 +820,7 @@ In doing so, this has introduced three new help options:
 2. ```-help-section <section-name>``` (or ```-hs <section-name>``` for short)
 3. ``` -help-all``` (or ```-ha``` for short)
 
-### 8.1 -help-option <regex\>
+### 11.1 -help-option <regex\>
 ------------------------
 
 The -help-option option displays all the options that match the <regex\> regular
@@ -580,7 +881,7 @@ wanted to return all the options that operate on uids and gids, you could do
                         gid
 ```
 
-### 8.2 -help-section <section\>
+### 11.2 -help-section <section\>
 
 The ```-help-section``` option displays the section that matches the <section\> name.
 If <section\> does not exactly match a section name, it is treated as a regular
@@ -668,13 +969,13 @@ Filesystem build options:
 
 Will display the compression options and build options sections.
 
-### 8.3 -help-all
+### 11.3 -help-all
 
 The -help-all option displays all the help text, and it is similar to the
 behaviour of -help in previous Squashfs tools versions, except that the
 output is to a pager and not stdout.
 
-### 8.4. PAGER environment variable
+### 11.4. PAGER environment variable
 
 By default the tools try pager, /usr/bin/pager, less, /usr/bin/less, more,
 /usr/bin/more, cat and /usr/bin/cat in that order.
@@ -684,7 +985,7 @@ filename given by PAGER doesn't contain slashes, the PATH environment variable
 will be used to locate it, otherwise it will be treated as a pathname.
 
 
-## 9. REPRODUCIBLE FILESYSTEM IMAGES AND NEW OPTIONS
+## 12. REPRODUCIBLE FILESYSTEM IMAGES AND NEW OPTIONS
 
 If you want Mksquashfs to generate an identical (byte for byte) filesystem on
 every run, then the following conditions have to be true:
@@ -721,9 +1022,9 @@ It also introduces a new variant of -all-time, while also renaming it to
 -inode-time.  Lastly, there are some new easy to remember shorthand options
 added.
 
-### 9.1 New -mkfs-time, -root-time and -inode-time variants
+### 12.1 New -mkfs-time, -root-time and -inode-time variants
 
-#### 9.1.1 -mkfs-time inode
+#### 12.1.1 -mkfs-time inode
 
 This sets the filesystem make time to the latest inode timestamp in the
 source(s).  Because this is a relative value (rather than absolute), it ensures
@@ -738,13 +1039,13 @@ ignoring any fabricated timestamps (e.g. root directory), and all fabricated
 timestamps are set to the latest inode value too.  This means the -root-time
 option is no longer necessary if the -mkfs-time inode option is used.
 
-#### 9.1.2 -root-time inode
+#### 12.1.2 -root-time inode
 
 This sets the root directory timestamp to the latest inode timestamp in the
 source(s).  If -mkfs-time inode is specified this option is no longer
 necessary.
 
-#### 9.1.3 -inode-time inode
+#### 12.1.3 -inode-time inode
 
 This option has been renamed from -all-time [^2] in previous versions because
 all-time was a misnomer (it sets all the inode timestamps, but not also the
@@ -756,16 +1057,16 @@ functionality matching between options.
 
 [^2]: the name -all-time is still recognised for backwards compatibility.
 
-### 9.2 New easier to remember shorthand options
+### 12.2 New easier to remember shorthand options
 
-#### 9.2.1 -repro
+#### 12.2.1 -repro
 
 This option makes Mksquashfs build a reproducible filesystem image.  This is
 equivalent to -mkfs-time inode, which achieves reproducibility by setting the
 filesystem build time to the latest inode timestamp.  Obviously the image won't
 be reproducible if the timestamps or content changes.
 
-#### 9.2.2 -repro-time <time\>
+#### 12.2.2 -repro-time <time\>
 
 This option makes Mksquashfs build a reproducible filesystem image.  This is
 equivalent to specifying -mkfs-time <time\> and -inode-time <time\>, which
@@ -774,7 +1075,7 @@ be used in cases where timestamps may change, and where -repro cannot be used
 for this reason.
 
 
-### 10. AUTHOR INFO
+### 13. AUTHOR INFO
 
 Squashfs was written by Phillip Lougher, email phillip@squashfs.org.uk,
 in Chepstow, Wales, UK.   If you like the program, or have any problems,

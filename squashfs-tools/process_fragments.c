@@ -2,7 +2,7 @@
  * Create a squashfs filesystem.  This is a highly compressed read only
  * filesystem.
  *
- * Copyright (c) 2014, 2019, 2021, 2022, 2024, 2025
+ * Copyright (c) 2014, 2019, 2021, 2022, 2024, 2025, 2026
  * Phillip Lougher <phillip@squashfs.org.uk>
  *
  * This program is free software; you can redistribute it and/or
@@ -77,26 +77,6 @@ static int checksum_sparse(struct file_buffer *file_buffer)
 
 	file_buffer->checksum = chksum;
 	return sparse;
-}
-
-
-static int read_filesystem(int fd, long long byte, int bytes, void *buff)
-{
-	off_t off = byte;
-
-	TRACE("read_filesystem: reading from position 0x%llx, bytes %d\n",
-		byte, bytes);
-
-	if(lseek(fd, start_offset + off, SEEK_SET) == -1) {
-		ERROR("read_filesystem: Lseek on destination failed because %s, "
-			"offset=0x%llx\n", strerror(errno), start_offset + off);
-		return 0;
-	} else if(read_bytes(fd, buff, bytes) < bytes) {
-		ERROR("Read on destination failed\n");
-		return 0;
-	}
-
-	return 1;
 }
 
 
@@ -189,11 +169,10 @@ again:
 		if(compressed_buffer)
 			data = compressed_buffer->data;
 		else {
-			res = read_filesystem(fd, start_block, size, data_buffer);
+			res = read_fs_bytes(fd, start_block, size, data_buffer);
 			if(res == 0) {
-				ERROR("Failed to read fragment from output"
-					" filesystem\n");
-				BAD_ERROR("Output filesystem corrupted?\n");
+				buffer->error = TRUE;
+				goto unlock;
 			}
 			data = data_buffer;
 		}
@@ -201,24 +180,26 @@ again:
 		res = compressor_uncompress(comp, buffer->data, data, size,
 			block_size, &error);
 		if(res == -1)
-			BAD_ERROR("%s uncompress failed with error code %d\n",
-				comp->name, error);
+			buffer->error = TRUE;
 	} else if(compressed_buffer)
 		memcpy(buffer->data, compressed_buffer->data, size);
 	else {
-		res = read_filesystem(fd, start_block, size, buffer->data);
-		if(res == 0) {
-			ERROR("Failed to read fragment from output "
-				"filesystem\n");
-			BAD_ERROR("Output filesystem corrupted?\n");
-		}
+		res = read_fs_bytes(fd, start_block, size, buffer->data);
+		if(res == 0)
+			buffer->error = TRUE;
 	}
 
+unlock:
 	cache_unlock(buffer);
 	cache_block_put(compressed_buffer);
 
 finished:
 	pthread_cleanup_pop(0);
+
+	if(buffer->error) {
+		cache_block_put(buffer);
+		return NULL;
+	}
 
 	return buffer;
 }
@@ -232,6 +213,8 @@ struct file_buffer *get_fragment_cksum(struct file_info *file,
 	int index = file->fragment->index;
 
 	frag_buffer = get_fragment(file->fragment, data_buffer, fd);
+	if(frag_buffer == NULL)
+		return NULL;
 
 	pthread_cleanup_push((void *) pthread_mutex_unlock, &dup_mutex);
 
@@ -260,7 +243,6 @@ void *frag_thrd(void *destination_file)
 {
 	sigset_t sigmask, old_mask;
 	char *data_buffer;
-	int fd;
 
 	sigemptyset(&sigmask);
 	sigaddset(&sigmask, SIGINT);
@@ -268,13 +250,8 @@ void *frag_thrd(void *destination_file)
 	sigaddset(&sigmask, SIGUSR1);
 	pthread_sigmask(SIG_BLOCK, &sigmask, &old_mask);
 
-	if(duplicate_checking) {
-		fd = open(destination_file, O_RDONLY);
-		if(fd == -1)
-			BAD_ERROR("frag_thrd: can't open destination for reading\n");
-
+	if(duplicate_checking)
 		data_buffer = MALLOC(SQUASHFS_FILE_MAX_SIZE);
-	}
 
 	pthread_cleanup_push((void *) pthread_mutex_unlock, &dup_mutex);
 
@@ -309,10 +286,8 @@ void *frag_thrd(void *destination_file)
 		 * interested in the "low hanging fruit" of files which
 		 * consist of only a fragment
 		 */
-		if(!duplicate_checking || file_buffer->file_size != file_buffer->size) {
-			main_queue_put(to_main, file_buffer);
-			continue;
-		}
+		if(!duplicate_checking || file_buffer->file_size != file_buffer->size)
+			goto skip_file;
 
 		file_size = file_buffer->file_size;
 
@@ -344,14 +319,18 @@ void *frag_thrd(void *destination_file)
 			if(!flag) {
 				buffer = get_fragment_cksum(dupl_ptr,
 					data_buffer, fd, &checksum);
+				if(buffer == NULL)
+					goto skip_file;
 				if(checksum != file_buffer->checksum) {
 					cache_block_put(buffer);
 					continue;
 				}
-			} else if(checksum == file_buffer->checksum)
+			} else if(checksum == file_buffer->checksum) {
 				buffer = get_fragment(dupl_ptr->fragment,
 					data_buffer, fd);
-			else
+				if(buffer == NULL)
+					goto skip_file;
+			} else
 				continue;
 
 			res = memcmp(file_buffer->data, buffer->data +
@@ -369,6 +348,7 @@ void *frag_thrd(void *destination_file)
 			}
 		}
 
+skip_file:
 		main_queue_put(to_main, file_buffer);
 	}
 
