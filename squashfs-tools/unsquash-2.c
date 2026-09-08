@@ -2,7 +2,7 @@
  * Unsquash a squashfs filesystem.  This is a highly compressed read only
  * filesystem.
  *
- * Copyright (c) 2009, 2010, 2012, 2013, 2019, 2021, 2022, 2023, 2025
+ * Copyright (c) 2009, 2010, 2012, 2013, 2019, 2021, 2022, 2023, 2025, 2026
  * Phillip Lougher <phillip@squashfs.org.uk>
  *
  * This program is free software; you can redistribute it and/or
@@ -31,29 +31,36 @@ static squashfs_fragment_entry_2 *fragment_table;
 static unsigned int *uid_table, *guid_table;
 static squashfs_operations ops;
 static int needs_sorting = FALSE;
+static long long block_start;
+static unsigned int block_offset;
 
-
-static void read_block_list(unsigned int *block_list, long long start,
-					unsigned int offset, int blocks)
+static void init_block_list(long long start, unsigned int offset)
 {
-	int res;
+	block_start = start;
+	block_offset = offset;
+}
 
-	TRACE("read_block_list: blocks %d\n", blocks);
+
+static int next_block_list()
+{
+	int res, block_size;
 
 	if(swap) {
-		char *block_ptr = MALLOC(blocks * sizeof(unsigned int));
-		res = read_inode_data(block_ptr, &start, &offset, blocks * sizeof(unsigned int));
+		int sblock_size;
+
+		res = read_inode_data(&sblock_size, &block_start, &block_offset, sizeof(unsigned int));
 		if(res == FALSE)
 			EXIT_UNSQUASH("read_block_list: failed to read "
-				"inode index %lld:%d\n", start, offset);
-		SQUASHFS_SWAP_INTS_3(block_list, block_ptr, blocks);
-		free(block_ptr);
+				"inode index %lld:%d\n", block_start, block_offset);
+		SQUASHFS_SWAP_INTS_3((&block_size), (&sblock_size), 1);
 	} else {
-		res = read_inode_data(block_list, &start, &offset, blocks * sizeof(unsigned int));
+		res = read_inode_data(&block_size, &block_start, &block_offset, sizeof(unsigned int));
 		if(res == FALSE)
 			EXIT_UNSQUASH("read_block_list: failed to read "
-				"inode index %lld:%d\n", start, offset);
+				"inode index %lld:%d\n", block_start, block_offset);
 	}
+
+	return block_size;
 }
 
 
@@ -91,7 +98,7 @@ static int read_fragment_table(long long *table_start)
 	if(swap) {
 		 unsigned int *sfragment_table_index = MALLOC(length);
 
-		 res = read_fs_bytes(fd, sBlk.s.fragment_table_start,
+		 res = read_fs_data(fd, sBlk.s.fragment_table_start,
 			length, sfragment_table_index);
 		if(res == FALSE) {
 			ERROR("read_fragment_table: failed to read fragment "
@@ -103,7 +110,7 @@ static int read_fragment_table(long long *table_start)
 			sfragment_table_index, indexes);
 		free(sfragment_table_index);
 	} else {
-		res = read_fs_bytes(fd, sBlk.s.fragment_table_start,
+		res = read_fs_data(fd, sBlk.s.fragment_table_start,
 			length, fragment_table_index);
 		if(res == FALSE) {
 			ERROR("read_fragment_table: failed to read fragment "
@@ -274,19 +281,17 @@ static struct inode *read_inode(unsigned int start_block, unsigned int offset)
 				EXIT_UNSQUASH("read_inode: failed to read "
 					"inode %lld:%d\n", start, offset);
 
+			i.frag_bytes = squashfs_file_frag(inode->file_size,
+				inode->fragment, &sBlk.s);
+			i.blocks = squashfs_file_blocks(inode->file_size,
+				inode->fragment, &sBlk.s);
 			i.data = inode->file_size;
 			if(time_opt)
 				i.time = timeval;
 			else
 				i.time = inode->mtime;
-			i.frag_bytes = inode->fragment == SQUASHFS_INVALID_FRAG
-				?  0 : inode->file_size % sBlk.s.block_size;
 			i.fragment = inode->fragment;
 			i.offset = inode->offset;
-			i.blocks = inode->fragment == SQUASHFS_INVALID_FRAG ?
-				(i.data + sBlk.s.block_size - 1) >>
-				sBlk.s.block_log : i.data >>
-				sBlk.s.block_log;
 			i.start = inode->start_block;
 			i.block_start = start;
 			i.block_offset = offset;
@@ -586,6 +591,12 @@ static int read_filesystem_tables()
 		goto corrupted;
 	}
 
+	/* Sanity check root inode */
+	if(sBlk.s.root_inode < 0) {
+		ERROR("read_filesystem_tables: root inode start is negative in super block\n");
+		goto corrupted;
+	}
+
 	return TRUE;
 
 corrupted:
@@ -695,7 +706,8 @@ static void squashfs_stat(char *source)
 static squashfs_operations ops = {
 	.opendir = squashfs_opendir,
 	.read_fragment = read_fragment,
-	.read_block_list = read_block_list,
+	.init_block_list = init_block_list,
+	.next_block_list = next_block_list,
 	.read_inode = read_inode,
 	.read_filesystem_tables = read_filesystem_tables,
 	.stat = squashfs_stat

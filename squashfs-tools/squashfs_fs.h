@@ -4,7 +4,7 @@
  * Squashfs
  *
  * Copyright (c) 2002, 2003, 2004, 2005, 2006, 2007, 2008, 2009, 2010, 2012,
- * 2013, 2014, 2017, 2019, 2022, 2023
+ * 2013, 2014, 2017, 2019, 2022, 2023, 2026
  * Phillip Lougher <phillip@squashfs.org.uk>
  *
  * This program is free software; you can redistribute it and/or
@@ -175,7 +175,7 @@
 #define SQUASHFS_MODE(a)		((a) & 0xfff)
 
 /* fragment and fragment table defines */
-#define SQUASHFS_FRAGMENT_BYTES(A)	((A) * \
+#define SQUASHFS_FRAGMENT_BYTES(A)	((long long)(A) * \
 					sizeof(struct squashfs_fragment_entry))
 
 #define SQUASHFS_FRAGMENT_INDEX(A)	(SQUASHFS_FRAGMENT_BYTES(A) / \
@@ -192,7 +192,7 @@
 						sizeof(long long))
 
 /* inode lookup table defines */
-#define SQUASHFS_LOOKUP_BYTES(A)	((A) * sizeof(squashfs_inode))
+#define SQUASHFS_LOOKUP_BYTES(A)	((long long)(A) * sizeof(squashfs_inode))
 
 #define SQUASHFS_LOOKUP_BLOCK(A)		(SQUASHFS_LOOKUP_BYTES(A) / \
 						SQUASHFS_METADATA_SIZE)
@@ -208,7 +208,7 @@
 					sizeof(long long))
 
 /* uid lookup table defines */
-#define SQUASHFS_ID_BYTES(A)	((A) * sizeof(unsigned int))
+#define SQUASHFS_ID_BYTES(A)	((unsigned int)(A) * sizeof(unsigned int))
 
 #define SQUASHFS_ID_BLOCK(A)		(SQUASHFS_ID_BYTES(A) / \
 						SQUASHFS_METADATA_SIZE)
@@ -501,4 +501,29 @@ struct squashfs_xattr_table {
 	unsigned int		unused;
 };
 
+static inline long long squashfs_file_blocks(long long size, unsigned int fragment,
+			struct squashfs_super_block *sBlk) {
+	if(fragment == SQUASHFS_INVALID_FRAG) {
+		if(size & (sBlk->block_size - 1))
+			return (size >> sBlk->block_log) + 1;
+		else
+			return size >> sBlk->block_log;
+	} else
+		return size >> sBlk->block_log;
+}
+
+static inline int squashfs_file_frag(long long size, unsigned int fragment,
+			struct squashfs_super_block *sBlk) {
+	if(fragment == SQUASHFS_INVALID_FRAG)
+		return 0;
+	else
+		return size & (sBlk->block_size - 1);
+}
+
+static inline long long squashfs_all_blocks(long long size, struct squashfs_super_block *sBlk) {
+	if(size & (sBlk->block_size - 1))
+		return (size >> sBlk->block_log) + 1;
+	else
+		return size >> sBlk->block_log;
+}
 #endif

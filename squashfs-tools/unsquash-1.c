@@ -2,7 +2,8 @@
  * Unsquash a squashfs filesystem.  This is a highly compressed read only
  * filesystem.
  *
- * Copyright (c) 2009, 2010, 2011, 2012, 2013, 2019, 2021, 2022, 2023, 2025
+ * Copyright (c) 2009, 2010, 2011, 2012, 2013, 2019, 2021, 2022, 2023, 2025,
+ * 2026
  * Phillip Lougher <phillip@squashfs.org.uk>
  *
  * This program is free software; you can redistribute it and/or
@@ -29,38 +30,39 @@
 
 static unsigned int *uid_table, *guid_table;
 static squashfs_operations ops;
+static long long block_start;
+static unsigned int block_offset;
 
-static void read_block_list(unsigned int *block_list, long long start,
-	unsigned int offset, int blocks)
+static void init_block_list(long long start, unsigned int offset)
 {
-	unsigned short *source;
-	int i, res;
+	block_start = start;
+	block_offset = offset;
+}
 
-	TRACE("read_block_list: blocks %d\n", blocks);
 
-	source = MALLOC(blocks * sizeof(unsigned short));
+static int next_block_list()
+{
+	int res;
+	unsigned short block_size;
 
 	if(swap) {
-		char *swap_buff = MALLOC(blocks * sizeof(unsigned short));
+		unsigned short sblock_size;
 
-		res = read_inode_data(swap_buff, &start, &offset, blocks * sizeof(unsigned short));
+		res = read_inode_data(&sblock_size, &block_start, &block_offset, sizeof(unsigned short));
 		if(res == FALSE)
 			EXIT_UNSQUASH("read_block_list: failed to read "
-					"inode index %lld:%d\n", start, offset);
-		SQUASHFS_SWAP_SHORTS_3(source, swap_buff, blocks);
-		free(swap_buff);
+				"inode index %lld:%d\n", block_start, block_offset);
+		SQUASHFS_SWAP_SHORTS_3((&block_size), (&sblock_size), 1);
 	} else {
-		res = read_inode_data(source, &start, &offset, blocks * sizeof(unsigned short));
+		res = read_inode_data(&block_size, &block_start, &block_offset, sizeof(unsigned short));
 		if(res == FALSE)
 			EXIT_UNSQUASH("read_block_list: failed to read "
-					"inode index %lld:%d\n", start, offset);
+				"inode index %lld:%d\n", block_start, block_offset);
 	}
 
-	for(i = 0; i < blocks; i++)
-		block_list[i] = SQUASHFS_COMPRESSED_SIZE(source[i]) |
-			(SQUASHFS_COMPRESSED(source[i]) ? 0 :
+	return SQUASHFS_COMPRESSED_SIZE(block_size) |
+			(SQUASHFS_COMPRESSED(block_size) ? 0 :
 			SQUASHFS_COMPRESSED_BIT_BLOCK);
-	free(source);
 }
 
 
@@ -186,8 +188,7 @@ static struct inode *read_inode(unsigned int start_block, unsigned int offset)
 				i.time = timeval;
 			else
 				i.time = inode->mtime;
-			i.blocks = (i.data + sBlk.s.block_size - 1) >>
-				sBlk.s.block_log;
+			i.blocks = squashfs_all_blocks(i.data, &sBlk.s);
 			i.start = inode->start_block;
 			i.block_start = start;
 			i.block_offset = offset;
@@ -470,6 +471,12 @@ static int read_filesystem_tables()
 		goto corrupted;
 	}
 
+	/* Sanity check root inode */
+	if(sBlk.s.root_inode < 0) {
+		ERROR("read_filesystem_tables: root inode start is negative in super block\n");
+		goto corrupted;
+	}
+
 	return TRUE;
 
 corrupted:
@@ -561,7 +568,8 @@ static void squashfs_stat(char *source)
 
 static squashfs_operations ops = {
 	.opendir = squashfs_opendir,
-	.read_block_list = read_block_list,
+	.init_block_list = init_block_list,
+	.next_block_list = next_block_list,
 	.read_inode = read_inode,
 	.read_filesystem_tables = read_filesystem_tables,
 	.stat = squashfs_stat

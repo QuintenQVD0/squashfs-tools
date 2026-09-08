@@ -43,6 +43,7 @@
 #include "merge_sort.h"
 #include "uid_gid.h"
 #include "symbolic_mode.h"
+#include "maths.h"
 
 #ifdef __linux__
 #include <sys/sysmacros.h>
@@ -73,6 +74,7 @@ int fd;
 unsigned int cached_frag = SQUASHFS_INVALID_FRAG;
 unsigned int block_size;
 unsigned int block_log;
+long long bytes_used = sizeof(struct squashfs_super_block) + SQUASHFS_METADATA_SIZE;
 int lsonly = FALSE, info = FALSE, force = FALSE, short_ls = TRUE;
 int concise = FALSE, quiet = FALSE, numeric = FALSE;
 int use_regex = FALSE;
@@ -669,13 +671,28 @@ long long read_bytes(int fd, void *buff, long long bytes)
 }
 
 
-int read_fs_bytes(int fd, long long byte, long long bytes, void *buff)
+int read_fs_data(int fd, long long byte, long long bytes, void *buff)
 {
 	off_t off = byte;
 	long long res;
 
 	TRACE("read_bytes: reading from position 0x%llx, bytes %lld\n", byte,
 		bytes);
+
+	if(byte < 0) {
+		ERROR("read_fs_data: trying to read from a negative position\n");
+		goto corrupted;
+	}
+
+	if(ADD_OVERFLOW(byte, bytes) > bytes_used) {
+		ERROR("read_fs_data: trying to read beyond filesystem end\n");
+		goto corrupted;
+	}
+
+	if(bytes < 0) {
+		ERROR("read_fs_data: trying to read a negative amount of bytes\n");
+		goto corrupted;
+	}
 
 	pthread_cleanup_push((void *) pthread_mutex_unlock, &pos_mutex);
 	pthread_mutex_lock(&pos_mutex);
@@ -695,6 +712,10 @@ int read_fs_bytes(int fd, long long byte, long long bytes, void *buff)
 done:
 	pthread_cleanup_pop(1);
 	return res;
+
+corrupted:
+	ERROR("read_fs_data: the filesystem appears to be corrupted\n");
+	return FALSE;
 }
 
 
@@ -710,11 +731,11 @@ int read_block(int fd, long long start, long long *next, int expected,
 		return FALSE;
 
 	if(swap) {
-		if(read_fs_bytes(fd, start, 2, &c_byte) == FALSE)
+		if(read_fs_data(fd, start, 2, &c_byte) == FALSE)
 			goto failed;
 		c_byte = (c_byte >> 8) | ((c_byte & 0xff) << 8);
 	} else 
-		if(read_fs_bytes(fd, start, 2, &c_byte) == FALSE)
+		if(read_fs_data(fd, start, 2, &c_byte) == FALSE)
 			goto failed;
 
 	TRACE("read_block: block @0x%llx, %d %s bytes\n", start,
@@ -741,7 +762,7 @@ int read_block(int fd, long long start, long long *next, int expected,
 		if(buffer == NULL)
 			buffer = MALLOC(SQUASHFS_METADATA_SIZE);
 
-		res = read_fs_bytes(fd, start + offset, c_byte, buffer);
+		res = read_fs_data(fd, ADD_OVERFLOW(start, offset), c_byte, buffer);
 		if(res == FALSE)
 			goto failed;
 
@@ -754,14 +775,14 @@ int read_block(int fd, long long start, long long *next, int expected,
 			goto failed;
 		}
 	} else {
-		res = read_fs_bytes(fd, start + offset, c_byte, block);
+		res = read_fs_data(fd, ADD_OVERFLOW(start, offset), c_byte, block);
 		if(res == FALSE)
 			goto failed;
 		res = c_byte;
 	}
 
 	if(next)
-		*next = start + offset + c_byte;
+		*next = ADD_OVERFLOW(start + offset, c_byte);
 
 	/*
 	 * if expected, then check the (uncompressed) return data
@@ -953,13 +974,11 @@ static int write_block(int file_fd, char *buffer, int size, long long hole, int 
 		}
 
 		if(sparse == FALSE || lseek_broken) {
-			int blocks = (hole + block_size -1) / block_size;
-			int avail_bytes, i;
+			long long blocks = squashfs_all_blocks(hole, &sBlk.s), i;
+			int avail_bytes;
 			for(i = 0; i < blocks; i++, hole -= avail_bytes) {
-				avail_bytes = hole > block_size ? block_size :
-					hole;
-				if(write_bytes(file_fd, zero_data, avail_bytes)
-						== -1)
+				avail_bytes = hole > block_size ? block_size : hole;
+				if(write_bytes(file_fd, zero_data, avail_bytes) == -1)
 					goto failure;
 			}
 		}
@@ -1091,15 +1110,15 @@ static inline int process_dir_mode(int mode)
 
 static int write_file(struct inode *inode, char *pathname)
 {
-	unsigned int file_fd, i;
-	unsigned int *block_list = NULL;
-	int file_end = inode->data / block_size, res;
+	unsigned int file_fd;
+	int res;
+	long long i, file_end = inode->data / block_size;
 	long long start = inode->start;
 	mode_t mode = process_file_mode(inode->mode);
 	struct stat buf;
 	struct file_entry *block;
 
-	TRACE("write_file: regular file, blocks %d\n", inode->blocks);
+	TRACE("write_file: regular file, blocks %lld\n", inode->blocks);
 
 	if(!root_process && !(mode & S_IWUSR) && has_xattrs(inode->xattr))
 		mode |= S_IWUSR;
@@ -1120,11 +1139,8 @@ static int write_file(struct inode *inode, char *pathname)
 		return FALSE;
 	}
 
-	if(inode->blocks) {
-		block_list = MALLOC(inode->blocks * sizeof(unsigned int));
-		s_ops->read_block_list(block_list, inode->block_start,
-					inode->block_offset, inode->blocks);
-	}
+	if(inode->blocks)
+		s_ops->init_block_list(inode->block_start, inode->block_offset);
 
 	/*
 	 * the writer thread is queued a squashfs_file structure describing the
@@ -1134,7 +1150,8 @@ static int write_file(struct inode *inode, char *pathname)
 	queue_file(pathname, file_fd, inode);
 
 	for(i = 0; i < inode->blocks; i++) {
-		int c_byte = SQUASHFS_COMPRESSED_SIZE_BLOCK(block_list[i]);
+		int block_list = s_ops->next_block_list();
+		int c_byte = SQUASHFS_COMPRESSED_SIZE_BLOCK(block_list);
 
 		if(c_byte < 0 || c_byte > block_size)
 			EXIT_UNSQUASH("File system corrupted - block size "
@@ -1145,11 +1162,10 @@ static int write_file(struct inode *inode, char *pathname)
 		block->offset = 0;
 		block->size = i == file_end ? inode->data & (block_size - 1) :
 			block_size;
-		if(block_list[i] == 0) /* sparse block */
+		if(block_list == 0) /* sparse block */
 			block->buffer = NULL;
 		else {
-			block->buffer = cache_get(data_cache, start,
-				block_list[i]);
+			block->buffer = cache_get(data_cache, start, block_list);
 			start += c_byte;
 		}
 		queue_put(to_writer, block);
@@ -1180,26 +1196,20 @@ static int write_file(struct inode *inode, char *pathname)
 		queue_put(to_writer, block);
 	}
 
-	free(block_list);
 	return TRUE;
 }
 
 
 static int cat_file(struct inode *inode, char *pathname)
 {
-	unsigned int i;
-	unsigned int *block_list = NULL;
-	int file_end = inode->data / block_size;
+	long long i, file_end = inode->data / block_size;
 	long long start = inode->start;
 	struct file_entry *block;
 
-	TRACE("cat_file: regular file, blocks %d\n", inode->blocks);
+	TRACE("cat_file: regular file, blocks %lld\n", inode->blocks);
 
-	if(inode->blocks) {
-		block_list = MALLOC(inode->blocks * sizeof(unsigned int));
-		s_ops->read_block_list(block_list, inode->block_start,
-					inode->block_offset, inode->blocks);
-	}
+	if(inode->blocks)
+		s_ops->init_block_list(inode->block_start, inode->block_offset);
 
 	/*
 	 * the writer thread is queued a squashfs_file structure describing the
@@ -1209,7 +1219,8 @@ static int cat_file(struct inode *inode, char *pathname)
 	queue_file(pathname, 0, inode);
 
 	for(i = 0; i < inode->blocks; i++) {
-		int c_byte = SQUASHFS_COMPRESSED_SIZE_BLOCK(block_list[i]);
+		int block_list = s_ops->next_block_list();
+		int c_byte = SQUASHFS_COMPRESSED_SIZE_BLOCK(block_list);
 
 		if(c_byte < 0 || c_byte > block_size)
 			EXIT_UNSQUASH("File system corrupted - block size "
@@ -1220,11 +1231,10 @@ static int cat_file(struct inode *inode, char *pathname)
 		block->offset = 0;
 		block->size = i == file_end ? inode->data & (block_size - 1) :
 			block_size;
-		if(block_list[i] == 0) /* sparse block */
+		if(block_list == 0) /* sparse block */
 			block->buffer = NULL;
 		else {
-			block->buffer = cache_get(data_cache, start,
-				block_list[i]);
+			block->buffer = cache_get(data_cache, start, block_list);
 			start += c_byte;
 		}
 		queue_put(to_writer, block);
@@ -1255,7 +1265,6 @@ static int cat_file(struct inode *inode, char *pathname)
 		queue_put(to_writer, block);
 	}
 
-	free(block_list);
 	return TRUE;
 }
 
@@ -2906,8 +2915,7 @@ static int pre_scan(char *parent_name, unsigned int start_block, unsigned int of
 					i = s_ops->read_inode(start_block, offset);
 					if(lookup(i->inode_number) == NULL) {
 						insert_lookup(i->inode_number, (char *) i);
-						total_blocks += (i->data +
-							(block_size - 1)) >> block_log;
+						total_blocks += squashfs_all_blocks(i->data, &sBlk.s);
 					}
 					total_files ++;
 				}
@@ -3289,7 +3297,7 @@ static void *reader(void *arg)
 {
 	while(1) {
 		struct cache_entry *entry = queue_get(to_reader);
-		int res = read_fs_bytes(fd, entry->block,
+		int res = read_fs_data(fd, entry->block,
 			SQUASHFS_COMPRESSED_SIZE_BLOCK(entry->size),
 			entry->data);
 
@@ -4433,7 +4441,7 @@ static int pseudo_scan1(char *parent_name, unsigned int start_block, unsigned in
 					pseudo_print(pathname, i, NULL, byte_offset);
 					if(type == SQUASHFS_FILE_TYPE) {
 						byte_offset += i->data;
-						total_blocks += (i->data + (block_size - 1)) >> block_log;
+						total_blocks += squashfs_all_blocks(i->data, &sBlk.s);
 					}
 					insert_lookup(i->inode_number, STRDUP(pathname));
 				} else
@@ -5411,6 +5419,7 @@ int main(int argc, char *argv[])
 
 	block_size = sBlk.s.block_size;
 	block_log = sBlk.s.block_log;
+	bytes_used = sBlk.s.bytes_used;
 
 	/*
 	 * Sanity check block size and block log.

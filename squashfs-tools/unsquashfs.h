@@ -78,7 +78,7 @@ struct hash_table_entry {
 };
 
 struct inode {
-	int		blocks;
+	long long	blocks;
 	long long	block_start;
 	unsigned int	block_offset;
 	long long	data;
@@ -102,8 +102,8 @@ typedef struct squashfs_operations {
 		unsigned int offset, struct inode **i);
 	void (*read_fragment)(unsigned int fragment, long long *start_block,
 		int *size);
-	void (*read_block_list)(unsigned int *block_list, long long start,
-		unsigned int offset, int blocks);
+	void (*init_block_list)(long long start, unsigned int offset);
+	int (*next_block_list)();
 	struct inode *(*read_inode)(unsigned int start_block,
 		unsigned int offset);
 	int (*read_filesystem_tables)();
@@ -310,7 +310,7 @@ extern int time_opt;
 /* unsquashfs.c */
 extern int read_inode_data(void *, long long *, unsigned int *, int);
 extern int read_directory_data(void *, long long *, unsigned int *, int);
-extern int read_fs_bytes(int fd, long long, long long, void *);
+extern int read_fs_data(int fd, long long, long long, void *);
 extern int read_block(int, long long, long long *, int, void *);
 extern void enable_progress_bar();
 extern void disable_progress_bar();
